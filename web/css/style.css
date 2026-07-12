@@ -435,13 +435,14 @@ input:focus, select:focus, button:focus {
 
 .modal {
     background: rgba(var(--panel2-rgb), max(var(--opacity), 0.9));
-    border: 1px solid var(--border2);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border2));
     border-radius: var(--child-radius);
     padding: 16px;
     min-width: 260px;
     max-width: min(480px, 92vw);
     max-height: 85vh;
     overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 }
 
 .modal h3 {
@@ -657,8 +658,7 @@ input:focus, select:focus, button:focus {
 }
 
 /* Distinct from the two plain reference links - meant to catch the eye,
-   see js/app.js's checkForUpdate(). Plain text (not a link) on purpose -
-   see index.html's comment on #update-link. */
+   see js/app.js's checkForUpdate(). Links to the plugin's release page. */
 #footer .update-link {
     color: var(--amber);
     font-weight: 700;
