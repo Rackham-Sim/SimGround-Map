@@ -1,0 +1,672 @@
+/* Palette lifted 1:1 from src/ui/Theme.h / Theme.cpp (ChartsReader-derived
+   dark navy palette) so the web frontend and the native ImGui panel read as
+   the same product - see NOTES.md (section 27). --accent/--opacity are
+   overwritten at runtime from GET /api/settings (js/settings.js). */
+:root {
+    --bg: #0d0f14;
+    --panel: #131620;
+    --panel-rgb: 19, 22, 32;
+    --panel2: #181c26;
+    --panel2-rgb: 24, 28, 38;
+    --panel3: #1a1f2c;
+    --border: #1f2535;
+    --border2: #2a3048;
+    --red: #ff4757;
+    --text: #c8d0e0;
+    --text-dim: #5a6478;
+    --text-bright: #eef2ff;
+    --green: #00e676;
+    --amber: #ffb300;
+    --orange: #ff6d00;
+    --violet: #d500f9;
+    --white: #ffffff;
+    --cyan: #00e5ff;
+
+    --accent: var(--cyan);
+    --opacity: 1;
+
+    --taxiway-sign-bg: #000000;
+    --taxiway-sign-text: #ffdd00;
+
+    --card-radius: 8px;
+    --badge-radius: 5px;
+    --window-radius: 10px;
+    --child-radius: 8px;
+    --frame-radius: 6px;
+}
+
+@font-face {
+    font-family: "Roboto Medium";
+    src: url("../fonts/Roboto-Medium.ttf") format("truetype");
+    /* Declared as 400 (normal), not the file's own 500/Medium weight -
+       body text below requests normal weight by default (no font-weight
+       set anywhere), and a @font-face registered only for weight 500
+       simply isn't matched by a normal-weight text request in some
+       browsers, silently falling back to the sans-serif system font
+       instead (real-usage report: the web version didn't look like it was
+       using the same font at all). The glyphs themselves are still the
+       true Medium-weight outlines regardless of this descriptor - it only
+       controls which weight request selects this face. */
+    font-weight: 400;
+}
+
+@font-face {
+    font-family: "Cousine";
+    src: url("../fonts/Cousine-Regular.ttf") format("truetype");
+    font-weight: 400;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Roboto Medium", "Segoe UI", sans-serif;
+    font-size: 14px;
+    overflow: hidden;
+}
+
+.mono {
+    font-family: "Cousine", ui-monospace, monospace;
+}
+
+button {
+    font-family: inherit;
+    font-size: inherit;
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    border: 1px solid var(--border2);
+    border-radius: var(--frame-radius);
+    padding: 6px 10px;
+    cursor: pointer;
+}
+
+button:hover {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+button:active {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+button.accent-border {
+    border-color: var(--accent);
+    border-width: 1.5px;
+}
+
+input, select {
+    font-family: inherit;
+    font-size: inherit;
+    color: var(--text);
+    background: var(--panel3);
+    border: 1px solid var(--border2);
+    border-radius: var(--frame-radius);
+    padding: 6px 8px;
+}
+
+input:focus, select:focus, button:focus {
+    outline: 1px solid var(--accent);
+}
+
+.dim {
+    color: var(--text-dim);
+}
+
+.bright {
+    color: var(--text-bright);
+}
+
+/* ---- App shell -------------------------------------------------------- */
+
+#app {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+#titlebar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    row-gap: 6px;
+    gap: 8px;
+    padding: 10px 14px;
+    /* Fades with the "Opacity" setting like the native window's title bar -
+       see Theme.cpp's bg.w = opacity. Body/html behind stays fully opaque
+       (--bg has no alpha), since a browser tab has no desktop to reveal
+       through it the way the in-sim overlay window does. */
+    background: rgba(var(--panel-rgb), var(--opacity));
+    border-bottom: 1px solid var(--border);
+    flex: 0 0 auto;
+}
+
+#titlebar .accent-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex: 0 0 auto;
+}
+
+#titlebar .title {
+    font-weight: 700;
+    color: var(--text-bright);
+    flex: 0 0 auto;
+}
+
+#titlebar .conn-status {
+    margin-left: auto;
+    font-size: 12px;
+}
+
+#titlebar .conn-status.ok { color: var(--green); }
+#titlebar .conn-status.bad { color: var(--red); }
+
+#gear-btn {
+    background: transparent;
+    border: none;
+    color: var(--accent);
+    font-size: 18px;
+    padding: 4px 8px;
+    line-height: 1;
+}
+
+#gear-btn:hover {
+    color: var(--text-bright);
+    background: transparent;
+}
+
+#collapse-btn {
+    background: transparent;
+    border: 1px solid var(--border2);
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 4px 10px;
+}
+
+#collapse-btn:hover {
+    color: var(--text-bright);
+    border-color: var(--accent);
+}
+
+/* Hides the airport list and lets the map panel take the full width - see
+   NOTES.md. Toggled by js/app.js, persisted per-browser (localStorage, not
+   the shared /api/settings) since different devices/tabs reasonably want
+   different collapse states (e.g. a phone vs. the desktop the plugin runs
+   on). */
+#main.list-collapsed #airports-panel {
+    display: none;
+}
+
+#main {
+    flex: 1 1 auto;
+    display: flex;
+    min-height: 0;
+    gap: 12px;
+    padding: 12px;
+}
+
+#airports-panel {
+    flex: 0 0 340px;
+    background: rgba(var(--panel-rgb), var(--opacity));
+    border: 1px solid var(--border);
+    border-radius: var(--window-radius);
+    padding: 14px;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+#map-panel {
+    flex: 1 1 auto;
+    background: rgba(var(--panel-rgb), var(--opacity));
+    border: 1px solid var(--border);
+    border-radius: var(--window-radius);
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+}
+
+/* Tablet / narrow window: stack vertically instead of side by side. */
+@media (max-width: 900px) {
+    #main {
+        flex-direction: column;
+        overflow-y: auto;
+    }
+    #airports-panel {
+        flex: 0 0 auto;
+        max-height: 45vh;
+    }
+    #map-panel {
+        flex: 1 1 60vh;
+    }
+}
+
+/* ---- Airports panel ---------------------------------------------------- */
+
+.section-label {
+    color: var(--text-dim);
+    text-transform: uppercase;
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    margin: 10px 0 4px;
+    padding-bottom: 4px;
+    border-bottom: 1.5px solid var(--accent);
+}
+.section-label:first-child { margin-top: 0; }
+
+.status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.status-row .error {
+    color: var(--red);
+    font-size: 12px;
+}
+
+.airport-card {
+    position: relative;
+    background: rgba(var(--panel2-rgb), var(--opacity));
+    border: 1px solid var(--border2);
+    border-radius: var(--card-radius);
+    padding: 8px 12px;
+    margin: 8px 0;
+    cursor: pointer;
+    min-height: 96px;
+}
+
+.airport-card:hover, .airport-card.selected {
+    background: var(--panel3);
+    border-color: var(--accent);
+    border-width: 1.5px;
+}
+
+.airport-card.empty {
+    cursor: default;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    min-height: 60px;
+}
+
+.airport-card .header-row {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    row-gap: 6px;
+    column-gap: 10px;
+}
+
+.airport-card .icao {
+    font-family: "Cousine", monospace;
+    font-size: 22px;
+    color: var(--text-bright);
+}
+
+.airport-card .name {
+    color: var(--text);
+    font-size: 13px;
+    flex: 1 1 60px;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.badge {
+    display: inline-flex;
+    align-items: center;
+    border-radius: var(--badge-radius);
+    border: 1px solid currentColor;
+    padding: 3px 6px;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+    background: color-mix(in srgb, currentColor 15%, transparent);
+}
+
+.badge.auto { color: var(--green); }
+.badge.manual { color: var(--amber); }
+
+.badge-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+.atis-chip {
+    color: var(--text-dim);
+}
+.atis-chip.ready { color: var(--cyan); cursor: pointer; }
+.atis-chip.error { color: var(--red); cursor: pointer; }
+.atis-chip:hover.ready, .atis-chip:hover.error { filter: brightness(1.3); }
+
+.runway-chips {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+}
+
+.runway-chip {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+}
+
+.runway-chip .tag {
+    font-size: 10px;
+    font-weight: 700;
+    border-radius: var(--badge-radius);
+    padding: 1px 6px;
+    border: 1px solid currentColor;
+    background: color-mix(in srgb, currentColor 18%, transparent);
+    visibility: hidden;
+}
+.runway-chip .tag.dep { color: var(--green); }
+.runway-chip .tag.arr { color: var(--amber); }
+.runway-chip .tag.show { visibility: visible; }
+
+.runway-chip .box {
+    min-width: 30px;
+    text-align: center;
+    background: var(--panel3);
+    border: 1.5px solid var(--text-bright);
+    border-radius: 3px;
+    color: var(--text-bright);
+    padding: 3px 6px;
+    font-family: "Cousine", monospace;
+    font-size: 12px;
+}
+
+.delete-btn {
+    position: absolute;
+    right: 6px;
+    bottom: 6px;
+    width: 22px;
+    height: 20px;
+    padding: 0;
+    line-height: 1;
+    background: color-mix(in srgb, var(--red) 20%, transparent);
+    border-color: var(--red);
+    color: var(--red);
+}
+.delete-btn:hover {
+    background: var(--red);
+    color: var(--text-bright);
+}
+
+#add-airport-btn, #clear-list-btn {
+    width: 100%;
+    margin-top: 8px;
+    padding: 8px;
+}
+
+/* ---- Modal / popup ------------------------------------------------------ */
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+}
+
+.modal-backdrop.hidden { display: none; }
+
+.modal {
+    background: rgba(var(--panel2-rgb), max(var(--opacity), 0.9));
+    border: 1px solid var(--border2);
+    border-radius: var(--child-radius);
+    padding: 16px;
+    min-width: 260px;
+    max-width: min(480px, 92vw);
+    max-height: 85vh;
+    overflow-y: auto;
+}
+
+.modal h3 {
+    margin: 0 0 4px;
+    color: var(--text-dim);
+    font-size: 12px;
+    text-transform: uppercase;
+    font-weight: 700;
+}
+
+.modal hr {
+    border: none;
+    border-top: 1px solid var(--border2);
+    margin: 8px 0;
+}
+
+.modal .actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.field-error {
+    color: var(--red);
+    font-size: 12px;
+    margin: 4px 0;
+}
+
+/* ---- Map panel ---------------------------------------------------------- */
+
+#map-header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+}
+
+#map-header .icao {
+    font-family: "Cousine", monospace;
+    font-size: 22px;
+    color: var(--text-bright);
+}
+
+#map-status {
+    margin-left: auto;
+    font-size: 12px;
+    font-weight: 700;
+}
+#map-status.live { color: var(--green); }
+#map-status.off { color: var(--amber); }
+
+#no-route-badge {
+    color: var(--amber);
+    font-size: 12px;
+    font-weight: 700;
+    flex: 0 0 100%;
+}
+
+#map-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+}
+
+#map-toolbar button {
+    min-width: 40px;
+    min-height: 34px;
+}
+
+#map-toolbar button.track-active {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent);
+    border-width: 1.5px;
+    color: var(--text-bright);
+}
+
+/* Separates the track-mode buttons from the zoom controls that follow -
+   they're a distinct concern (camera follow vs. manual zoom level). */
+#track-heading-btn {
+    margin-right: 8px;
+}
+
+#zoom-pct {
+    color: var(--text-dim);
+    font-size: 12px;
+    min-width: 42px;
+}
+
+#map-canvas-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    border: 1px solid var(--border2);
+    border-radius: var(--child-radius);
+    overflow: hidden;
+    position: relative;
+    touch-action: none;
+}
+
+#map-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+#map-placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    text-align: center;
+    padding: 20px;
+}
+
+/* ---- Settings popover ---------------------------------------------------- */
+
+.swatch-row {
+    display: flex;
+    gap: 8px;
+    margin: 6px 0;
+}
+
+.swatch {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    border: 1px solid var(--border2);
+    cursor: pointer;
+    padding: 0;
+}
+
+.swatch.selected {
+    outline: 2px solid var(--text-bright);
+    outline-offset: 2px;
+}
+
+.setting-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+}
+
+.setting-row label {
+    flex: 0 0 auto;
+    min-width: 90px;
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.setting-row input[type="text"],
+.setting-row input[type="password"],
+.setting-row input[type="number"],
+.setting-row select {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.setting-row input[type="range"] {
+    flex: 1 1 auto;
+}
+
+.setting-row input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+}
+
+#detected-ips {
+    font-family: "Cousine", monospace;
+    font-size: 12px;
+    background: var(--panel3);
+    border: 1px solid var(--border2);
+    border-radius: var(--frame-radius);
+    padding: 8px;
+    margin-top: 6px;
+}
+
+#detected-ips a {
+    color: var(--cyan);
+    display: block;
+}
+
+#detected-ips .warn {
+    color: var(--amber);
+}
+
+/* ---- Footer -------------------------------------------------------------- */
+
+#footer {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 8px 14px;
+    font-size: 12px;
+    border-top: 1px solid var(--border);
+}
+
+#footer a {
+    color: var(--text-dim);
+    text-decoration: none;
+}
+
+#footer a:hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
+/* Distinct from the two plain reference links - meant to catch the eye,
+   see js/app.js's checkForUpdate(). Plain text (not a link) on purpose -
+   see index.html's comment on #update-link. */
+#footer .update-link {
+    color: var(--amber);
+    font-weight: 700;
+}
+
+/* ---- Scrollbars (thin, dark, matches ImGui's own rounded look) --------- */
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }

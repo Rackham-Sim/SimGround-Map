@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>SimGround Map</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+    <div id="titlebar">
+        <div class="accent-dot"></div>
+        <div class="title">SimGround Map</div>
+        <button id="collapse-btn" data-i18n-title="titlebar.hideListTitle" title="Hide the airport list">&laquo; <span data-i18n="titlebar.hideList">Hide list</span></button>
+        <div id="conn-status" class="conn-status dim" data-i18n="common.connecting">connecting...</div>
+        <button id="gear-btn" data-i18n-title="titlebar.settingsTitle" title="Settings">&#9881;</button>
+    </div>
+
+    <div id="main">
+        <div id="airports-panel">
+            <div class="status-row">
+                <button id="refresh-btn" data-i18n="panel.refresh">Refresh</button>
+                <span id="fetch-error" class="error"></span>
+            </div>
+
+            <div class="section-label">DEP</div>
+            <div id="dep-card"></div>
+
+            <div class="section-label">DEST</div>
+            <div id="dest-card"></div>
+
+            <div class="section-label">ALT</div>
+            <div id="alt-cards"></div>
+
+            <button id="add-airport-btn" class="accent-border" data-i18n="panel.addAirport">+ Add airport</button>
+            <button id="clear-list-btn" data-i18n="panel.clearList">Clear list</button>
+        </div>
+
+        <div id="map-panel">
+            <div id="map-header">
+                <span class="icao" id="map-icao">-</span>
+                <span id="map-name" class="dim"></span>
+                <span id="map-status"></span>
+                <div id="no-route-badge" style="display:none" data-i18n="map.noRouteBadge">NO TAXI ROUTE DATA</div>
+            </div>
+
+            <div id="map-toolbar">
+                <button id="track-north-btn" data-i18n="map.trackNorth" data-i18n-title="map.trackNorthTitle" title="Track aircraft (keep north up)">Track</button>
+                <button id="track-heading-btn" data-i18n="map.trackHeading" data-i18n-title="map.trackHeadingTitle" title="Track aircraft (rotate with heading up)">Track+Hdg</button>
+                <button id="zoom-out-btn">-</button>
+                <button id="zoom-reset-btn" data-i18n="map.zoomReset">Reset</button>
+                <button id="zoom-in-btn">+</button>
+                <span id="zoom-pct" class="mono">100%</span>
+                <button id="clear-route-btn" style="display:none" data-i18n="map.clearRoute">Clear Route</button>
+            </div>
+
+            <div id="map-canvas-wrap">
+                <canvas id="map-canvas"></canvas>
+                <div id="map-placeholder" data-i18n="map.selectAirportPlaceholder">Select an airport from the list to load its ground map.</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="footer">
+        <span id="app-version" class="dim mono"></span>
+        <span id="update-sep" class="dim" style="display:none">|</span>
+        <!-- Plain text, not a link, on purpose - there's no page to send
+             anyone to yet (won't exist until the first official release is
+             published) and that timing can't be known in advance. Revisit
+             once a real releases page exists. -->
+        <span id="update-link" class="update-link" style="display:none" data-i18n="footer.newVersionAvailable">New version available</span>
+        <span class="dim">|</span>
+        <a href="https://forums.x-plane.org/files/file/93858-simload-manager-realistic-pax-cargo-fuel-ground-operations/" target="_blank" rel="noopener">Simload Manager</a>
+        <span class="dim">|</span>
+        <a href="https://ko-fi.com/rackhamrpl" target="_blank" rel="noopener" data-i18n="footer.supportKofi">Support on Ko-fi</a>
+    </div>
+</div>
+
+<!-- Add manual airport -->
+<div id="add-airport-modal" class="modal-backdrop hidden">
+    <div class="modal">
+        <h3 data-i18n="modal.manualDiversion">Manual diversion</h3>
+        <hr>
+        <div data-i18n="modal.icaoCodeLabel">ICAO code (4 characters)</div>
+        <input id="add-airport-input" type="text" maxlength="4" style="text-transform:uppercase; width:100px;">
+        <div id="add-airport-error" class="field-error"></div>
+        <div class="actions">
+            <button id="add-airport-confirm" class="accent-border" data-i18n="modal.add">Add</button>
+            <button id="add-airport-cancel" data-i18n="modal.cancel">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<!-- Clear list confirm -->
+<div id="clear-list-modal" class="modal-backdrop hidden">
+    <div class="modal">
+        <div class="bright" style="color:var(--red)" data-i18n="modal.clearListConfirmTitle">Clear the entire airport list?</div>
+        <div class="dim" data-i18n="modal.clearListConfirmBody">This removes DEP/DEST/ALT entries.</div>
+        <hr>
+        <div class="actions">
+            <button id="clear-list-confirm" class="accent-border" data-i18n="modal.confirm">Confirm</button>
+            <button id="clear-list-cancel" data-i18n="modal.cancel">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<!-- ATIS popup -->
+<div id="atis-modal" class="modal-backdrop hidden">
+    <div class="modal" id="atis-modal-content"></div>
+</div>
+
+<!-- Settings popover -->
+<div id="settings-modal" class="modal-backdrop hidden">
+    <div class="modal" style="min-width:320px">
+        <h3 data-i18n="settings.display">Display</h3>
+        <hr>
+        <div class="setting-row">
+            <label data-i18n="settings.opacity">Opacity</label>
+            <input id="opacity-slider" type="range" min="0.3" max="1" step="0.01">
+            <span id="opacity-val" class="mono dim"></span>
+        </div>
+        <div class="swatch-row" id="accent-swatches"></div>
+        <div class="setting-row">
+            <label data-i18n="settings.language">Language</label>
+            <select id="language-select"></select>
+        </div>
+
+        <h3 style="margin-top:14px" data-i18n="settings.simbrief">SimBrief</h3>
+        <hr>
+        <div class="setting-row">
+            <label data-i18n="settings.userId">User ID</label>
+            <input id="simbrief-userid" type="text" inputmode="numeric">
+        </div>
+
+        <h3 style="margin-top:14px" data-i18n="settings.atisSection">ATIS</h3>
+        <hr>
+        <div class="setting-row">
+            <label data-i18n="settings.network">Network</label>
+            <select id="atis-network">
+                <option value="0">VATSIM</option>
+                <option value="1">IVAO</option>
+                <option value="2">SayIntentions AI</option>
+            </select>
+        </div>
+        <div class="setting-row" id="sayintentions-row">
+            <label data-i18n="settings.apiKey">API key</label>
+            <input id="sayintentions-key" type="password">
+        </div>
+
+        <h3 style="margin-top:14px" data-i18n="settings.webInterface">Web Interface</h3>
+        <hr>
+        <div class="setting-row">
+            <label data-i18n="settings.enabled">Enabled</label>
+            <input id="web-enabled" type="checkbox">
+        </div>
+        <div class="setting-row">
+            <label data-i18n="settings.port">Port</label>
+            <input id="web-port" type="number" min="1" max="65535">
+        </div>
+        <div id="detected-ips"></div>
+
+        <div class="actions">
+            <button id="settings-close" class="accent-border" data-i18n="settings.close">Close</button>
+        </div>
+    </div>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
