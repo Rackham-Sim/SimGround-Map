@@ -19,6 +19,15 @@ const ZOOM_BUTTON_FACTOR = 1.25;
 const CLICK_DRAG_THRESHOLD_PX = 6;
 const EDGE_HIT_RADIUS_PX = 8;
 const EDGE_HIT_RADIUS_TOUCH_PX = 16;
+// Mirrors PanelMap.cpp's kNodeCaptureRadiusMeters - gates the active-segment
+// truncation below on real proximity, not just distance-along-the-infinite-
+// line clamping. Without this, an aircraft anywhere off to one side of a
+// freshly-selected chain (e.g. right after a click, before any real
+// progress has been made) still projects onto SOME point on the edge, most
+// often clamped hard to whichever endpoint is nearer - if that's the edge's
+// own end point, the whole edge silently draws as a zero-length, invisible
+// line (real-usage report: a just-selected chain not highlighting at all).
+const NODE_CAPTURE_RADIUS_M = 25;
 const PARKING_CLUSTER_GRID_PX = 30;
 
 const canvas = document.getElementById("map-canvas");
@@ -26,13 +35,40 @@ const wrap = document.getElementById("map-canvas-wrap");
 const ctx = canvas.getContext("2d");
 const placeholder = document.getElementById("map-placeholder");
 
+// Cached once instead of re-queried by getElementById every render() call -
+// real-usage report ("la version web n'est pas très fluide"): updateHeader()
+// runs inside the 60fps requestAnimationFrame loop, and unlike canvas draws,
+// writing to the DOM (even to an unchanged value) forces the browser to
+// redo style recalculation - six lookups plus half a dozen writes every
+// single frame was measurable jank, most of it for text that only actually
+// changes a few times a minute (ICAO, name, badges, zoom%).
+const headerEls = {
+    icao: document.getElementById("map-icao"),
+    name: document.getElementById("map-name"),
+    status: document.getElementById("map-status"),
+    noRouteBadge: document.getElementById("no-route-badge"),
+    zoomPct: document.getElementById("zoom-pct"),
+    clearRouteBtn: document.getElementById("clear-route-btn"),
+};
+
 let icao = "";
 let mapData = null; // last GET /api/airport/{icao}/map body
 let taxiEdges = null; // full indexed edge list from GET .../taxi-network, or null
 let routeSelection = { edgeIndices: [], nodeSequence: [], edges: [], nextRequiredNodeIndex: 1 };
-let liveAircraft = null; // {lat, lon, groundSpeedKt, headingDeg, headingMagDeg, onAirport} from SSE
+let liveAircraft = null; // {lat, lon, groundSpeedKt, headingDeg, headingMagDeg, onAirport, onGround} from SSE
 let projectedAircraft = null; // {x, y} derived from liveAircraft + mapData.origin*
 let atisForActiveAirport = null; // AtisResult for `icao`, or null if not fetched - drives the DEP/ARR/closed runway dots
+
+// Smoothed aircraft ICON position/heading - ported from PanelMap.cpp's
+// gSmoothedAircraftPos (native parity, same technique/tau). projectedAircraft
+// only updates once per SSE event (~150ms), so drawing the icon straight at
+// that raw value every animation frame (~16ms) reads as a stutter (holds
+// still, then jumps) - real-usage report ("le mouvement de l'avion... est un
+// peu saccadé"). Reset (snapped, not eased) on an ICAO change or whenever
+// the icon reappears after being out of range - see their own reset sites.
+let smoothedAircraftPos = { x: 0, y: 0 };
+let smoothedAircraftHeadingDeg = 0;
+let aircraftSmoothingValid = false;
 
 let zoom = 1;
 let panOffset = { x: 0, y: 0 };
@@ -278,6 +314,17 @@ const AIRCRAFT_ICON_HALO_OFFSETS = [
     [1.4, 1.4], [-1.4, 1.4], [1.4, -1.4], [-1.4, -1.4],
 ];
 
+// User-provided arrow (assets/wind-arrow-icon.png) for the compass rose's
+// wind indicator - the exact same source PanelMap.cpp's WindArrowIconTexture.h
+// embeds, already baked cyan (the wind arrow's fixed color, not the user's
+// accent - see drawCompassRose's own comment) with alpha, so unlike the
+// aircraft icon above this one needs no separate tint/halo step, just drawn
+// as-is.
+const windArrowIconImg = new Image();
+let windArrowIconLoaded = false;
+windArrowIconImg.onload = () => { windArrowIconLoaded = true; };
+windArrowIconImg.src = "assets/wind-arrow-icon.png";
+
 function drawAircraftIcon(x, y, headingDeg) {
     if (!aircraftIconBlack) {
         return; // image still loading (first frame or two) - skip rather than draw a placeholder shape
@@ -314,10 +361,10 @@ function render() {
     const smoothAlpha = dtSec > 0 ? 1 - Math.exp(-dtSec / TRACK_SMOOTHING_TAU_SEC) : 1;
 
     if (!mapData) {
-        placeholder.style.display = "flex";
+        if (placeholder.style.display !== "flex") placeholder.style.display = "flex";
         return;
     }
-    placeholder.style.display = "none";
+    if (placeholder.style.display !== "none") placeholder.style.display = "none";
     refreshCssCache();
 
     if (icao !== lastIcaoForView) {
@@ -326,6 +373,7 @@ function render() {
         panOffset = { x: 0, y: 0 };
         rotationDeg = 0;
         trackMode = "off";
+        aircraftSmoothingValid = false;
         updateTrackButtons();
     }
 
@@ -471,7 +519,9 @@ function render() {
         ctx.lineWidth = Math.max(3, 6 * effectiveScale);
         ctx.lineCap = "round";
         const nextRequiredNodeIndex = routeSelection.nextRequiredNodeIndex ?? 1;
-        const routeAircraftPos = projectedAircraft || (mapData.aircraft ? { x: mapData.aircraft.x, y: mapData.aircraft.y } : null);
+        const routeAircraftPos = aircraftOnAirport
+            ? (projectedAircraft || (mapData.aircraft ? { x: mapData.aircraft.x, y: mapData.aircraft.y } : null))
+            : null;
         for (let i = 0; i < routeSelection.edges.length; ++i) {
             if (i + 1 < nextRequiredNodeIndex) {
                 continue; // walked - erased
@@ -482,8 +532,12 @@ function render() {
             if (e.node1Id === fromNodeId) { sx = e.x1; sy = e.y1; ex = e.x2; ey = e.y2; }
             else { sx = e.x2; sy = e.y2; ex = e.x1; ey = e.y1; }
             if (i + 1 === nextRequiredNodeIndex && routeAircraftPos) {
+                // Only truncate if the aircraft is actually near THIS edge -
+                // see NODE_CAPTURE_RADIUS_M's comment above.
                 const proj = projectOntoSegment(routeAircraftPos.x, routeAircraftPos.y, sx, sy, ex, ey);
-                sx = proj.x; sy = proj.y;
+                if (Math.hypot(routeAircraftPos.x - proj.x, routeAircraftPos.y - proj.y) < NODE_CAPTURE_RADIUS_M) {
+                    sx = proj.x; sy = proj.y;
+                }
             }
             const a = toScreen(sx, sy);
             const b = toScreen(ex, ey);
@@ -570,19 +624,155 @@ function render() {
     // snapshot's own aircraft field until the first SSE event arrives.
     if (aircraftOnAirport) {
         const pos = projectedAircraft || { x: mapData.aircraft.x, y: mapData.aircraft.y };
+        // Ease toward the latest raw sample rather than snapping straight to
+        // it - see smoothedAircraftPos's own comment. A fresh reappearance
+        // (just came back into range) snaps instead of sliding in from a
+        // stale position unrelated to where the aircraft actually is now.
+        if (!aircraftSmoothingValid) {
+            smoothedAircraftPos = { x: pos.x, y: pos.y };
+            smoothedAircraftHeadingDeg = headingDegForRotation;
+            aircraftSmoothingValid = true;
+        } else {
+            smoothedAircraftPos = {
+                x: smoothedAircraftPos.x + (pos.x - smoothedAircraftPos.x) * smoothAlpha,
+                y: smoothedAircraftPos.y + (pos.y - smoothedAircraftPos.y) * smoothAlpha,
+            };
+            smoothedAircraftHeadingDeg = angleLerpDeg(smoothedAircraftHeadingDeg, headingDegForRotation, smoothAlpha);
+        }
+
         // The map itself is rotated by rotationDeg (0 in north-up/off
         // modes, chasing -heading in heading-up track mode, or whatever the
         // user dialed in via right-drag) - adding that same rotation to the
         // icon's own heading keeps it pointing the right way on screen in
         // every mode, including mid-transition while rotationDeg is still
         // catching up to its target.
-        const heading = headingDegForRotation + rotationDeg;
-        const screenPos = toScreen(pos.x, pos.y);
+        const heading = smoothedAircraftHeadingDeg + rotationDeg;
+        const screenPos = toScreen(smoothedAircraftPos.x, smoothedAircraftPos.y);
         drawAircraftIcon(screenPos.x, screenPos.y, heading);
+    } else {
+        aircraftSmoothingValid = false; // re-snap next time it comes back into range
     }
 
     drawScaleBar(w, h, effectiveScale);
     drawPositionOverlay();
+    drawCompassRose(w);
+}
+
+// Compass rose: an N/S/E/W ring plus a wind arrow, top-right corner (mirrors
+// drawPositionOverlay's top-left placement) - real-usage request, ported
+// from PanelMap.cpp's DrawCompassRose (native parity, same layout/rotation
+// math). Fixed screen-space size, independent of zoom/pan, but its ring
+// ticks and the wind arrow both rotate together with `rotationDeg` (the
+// same value the aircraft icon's own heading adds, above) so "N" always
+// points at true north exactly the way the taxiway/runway geometry itself
+// does. The arrow points toward where the wind is blowing FROM (weather-
+// vane/METAR convention, e.g. "270 at 15" points at the west tick) - the
+// same reading a pilot already gets from a windsock or an ATIS report.
+// ac.windDirDeg/windSpeedKt/windDataAvailable are simulator weather at the
+// *displayed airport's* location (see AirportWeather.h natively), not the
+// aircraft's own position - stays correct while looking at an airport the
+// aircraft isn't physically at.
+function drawCompassRose(w) {
+    const ac = liveAircraft || (mapData ? mapData.aircraft : null);
+    if (!ac) return;
+
+    // Bumped from 36/11px off #5a6478 (real-usage report: cardinal points
+    // and the wind speed were both hard to make out at a glance) - matches
+    // drawPositionOverlay's own readout size/weight now (ported from
+    // PanelMap.cpp's DrawCompassRose, native parity), since this is primary
+    // navigational info too, not secondary/dim text.
+    const RADIUS = 40;
+    // Clearance from the canvas edge to the ring's own center - must cover
+    // not just RADIUS but the tick labels sitting just outside it too
+    // (offset 10px past the ring + the label's own half-size, worst case
+    // ~10px at a diagonal rotation), or a label pointing toward this
+    // corner's own top/right edges gets clipped there as the rose rotates
+    // with the map (real-usage report: bumping the label font size to 14px
+    // without widening this margin left visible overflow past the canvas
+    // edge). 20px covers that with a couple of px to spare. Mirrors
+    // PanelMap.cpp's kMargin.
+    const MARGIN = 20;
+    const cx = w - MARGIN - RADIUS, cy = MARGIN + RADIUS;
+
+    ctx.fillStyle = "rgba(13,15,20,0.75)";
+    ctx.strokeStyle = accentColor();
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Any true bearing (0=N, 90=E, ...) rotates onto the screen exactly the
+    // way the aircraft icon's heading does above - reused here for both the
+    // N/S/E/W ticks and the wind arrow so everything on this rose stays
+    // consistent with how the rest of the map is rotated.
+    const bearingToScreenDir = (bearingDeg) => {
+        const rad = ((bearingDeg + rotationDeg) * Math.PI) / 180;
+        return { x: Math.sin(rad), y: -Math.cos(rad) };
+    };
+
+    ctx.font = "bold 14px 'Roboto Medium', sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.lineJoin = "round";
+    for (const tick of [{ b: 0, l: "N" }, { b: 90, l: "E" }, { b: 180, l: "S" }, { b: 270, l: "W" }]) {
+        const dir = bearingToScreenDir(tick.b);
+        // N is drawn in the accent color (same convention as a real compass
+        // rose emphasizing north) so it's identifiable at a glance without
+        // reading the letter; E/S/W are bright rather than dim for the same
+        // "must be readable at a glance" reason.
+        const color = tick.l === "N" ? accentColor() : "#eef2ff";
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(cx + dir.x * (RADIUS - 9), cy + dir.y * (RADIUS - 9));
+        ctx.lineTo(cx + dir.x * RADIUS, cy + dir.y * RADIUS);
+        ctx.stroke();
+
+        const lx = cx + dir.x * (RADIUS + 10), ly = cy + dir.y * (RADIUS + 10);
+        // Dark outline behind each letter so it stays legible over whatever
+        // taxiway/pavement/route color happens to be directly behind it,
+        // not just the ring's own background - the labels sit just outside
+        // the ring, over the live map.
+        ctx.strokeStyle = "#0d0f14";
+        ctx.lineWidth = 3;
+        ctx.strokeText(tick.l, lx, ly);
+        ctx.fillStyle = color;
+        ctx.fillText(tick.l, lx, ly);
+    }
+
+    // No wind data at all (SSE hasn't connected yet / no dataref resolved
+    // natively) - bare ring rather than a misleading calm arrow.
+    if (!ac.windDataAvailable) return;
+
+    if (!windArrowIconLoaded) return; // image still loading (first frame or two) - skip rather than draw a placeholder
+
+    const dir = bearingToScreenDir(ac.windDirDeg);
+
+    // The source art rests pointing right/east (bearing 90) rather than up/
+    // north like the aircraft icon does - atan2(dir.y, dir.x) is exactly the
+    // angle that rotates a right-pointing source onto the `dir` unit vector
+    // directly (see PanelMap.cpp's DrawCompassRose for the full derivation).
+    const rad = Math.atan2(dir.y, dir.x);
+    // Offset a bit outward from the ring's own center (rather than centering
+    // the icon exactly on it) so the arrow visually sweeps from near the
+    // middle out toward the rim, same overall placement the old hand-drawn
+    // shaft+head had. Mirrors PanelMap.cpp's kIconHalfExtent/kIconCenterOffset.
+    const ICON_SIZE = 44, ICON_CENTER_OFFSET = 14;
+    const iconCx = cx + dir.x * ICON_CENTER_OFFSET, iconCy = cy + dir.y * ICON_CENTER_OFFSET;
+    ctx.save();
+    ctx.translate(iconCx, iconCy);
+    ctx.rotate(rad);
+    ctx.drawImage(windArrowIconImg, -ICON_SIZE / 2, -ICON_SIZE / 2, ICON_SIZE, ICON_SIZE);
+    ctx.restore();
+
+    // Speed, printed near the arrow's own (wide) back end - not rotated with
+    // it (a number only readable at certain wind headings would defeat the
+    // point of a live readout), dark-on-cyan for strong, stable contrast
+    // regardless of theme (this arrow is always cyan, not the user's chosen
+    // accent).
+    const numR = ICON_CENTER_OFFSET - 6;
+    ctx.fillStyle = "#0d0f14";
+    ctx.fillText(String(Math.round(ac.windSpeedKt)), cx + dir.x * numR, cy + dir.y * numR);
 }
 
 function drawScaleBar(w, h, scale) {
@@ -609,18 +799,24 @@ function drawPositionOverlay() {
     const x0 = 12, y0 = 12;
     const padX = 10, lineH = 21, padTop = 20, padBottom = 8;
 
-    const lines = [
-        `LAT ${ac.lat.toFixed(4)}  LON ${ac.lon.toFixed(4)}`,
-        `GS  ${Math.round(ac.groundSpeedKt)} kt`,
-        // Magnetic heading here, not true - matches the aircraft's own
-        // heading indicator/compass, which is what a pilot is actually
-        // comparing this readout against (real-usage report: true heading
-        // read as "off by a few degrees" from the aircraft's instruments -
-        // that's the local magnetic variation). The icon's own rotation,
-        // above, intentionally keeps using true heading since the map is
-        // projected true-north-up.
-        `HDG ${Math.round(ac.headingMagDeg)} deg`,
-    ];
+    // Real-usage request: LAT/LON/GS/HDG mean nothing useful while airborne
+    // (this box isn't a nav instrument, just ground-ops context), so show a
+    // plain "IN FLIGHT" status instead of numbers that just look stale. See
+    // PanelMap.cpp's DrawPositionOverlay (native parity).
+    const lines = ac.onGround
+        ? [
+              `LAT ${ac.lat.toFixed(4)}  LON ${ac.lon.toFixed(4)}`,
+              `GS  ${Math.round(ac.groundSpeedKt)} kt`,
+              // Magnetic heading here, not true - matches the aircraft's own
+              // heading indicator/compass, which is what a pilot is actually
+              // comparing this readout against (real-usage report: true heading
+              // read as "off by a few degrees" from the aircraft's instruments -
+              // that's the local magnetic variation). The icon's own rotation,
+              // above, intentionally keeps using true heading since the map is
+              // projected true-north-up.
+              `HDG ${Math.round(ac.headingMagDeg)} deg`,
+          ]
+        : [t("map.inFlight")];
 
     // Sized to fit the actual rendered text (measured, not a fixed guess) -
     // real-usage report: a fixed-width box (ported from the native
@@ -655,29 +851,63 @@ function roundRect(x, y, w, h, r) {
     ctx.closePath();
 }
 
+// Last-written value per field, so updateHeader() (called every render()
+// frame) only touches the DOM when something actually changed - see
+// headerEls's own comment for why that matters here specifically.
+let lastHeader = { icao: null, name: null, statusText: null, statusClass: null,
+                    noRouteDisplay: null, zoomPct: null, clearRouteDisplay: null };
+
 function updateHeader() {
-    document.getElementById("map-icao").textContent = mapData ? mapData.icao : "-";
-    document.getElementById("map-name").textContent = mapData ? mapData.name : "";
-    const statusEl = document.getElementById("map-status");
+    const icaoText = mapData ? mapData.icao : "-";
+    if (icaoText !== lastHeader.icao) { headerEls.icao.textContent = icaoText; lastHeader.icao = icaoText; }
+
+    const nameText = mapData ? mapData.name : "";
+    if (nameText !== lastHeader.name) { headerEls.name.textContent = nameText; lastHeader.name = nameText; }
+
     const aircraftOnAirport = !!(liveAircraft ? liveAircraft.onAirport : mapData?.aircraftOnAirport);
     if (mapData) {
         if (aircraftOnAirport) {
-            statusEl.textContent = t("map.gpsLive");
-            statusEl.className = "live";
-            statusEl.style.opacity = String(pulseAlpha());
+            const statusText = t("map.gpsLive");
+            if (statusText !== lastHeader.statusText || lastHeader.statusClass !== "live") {
+                headerEls.status.textContent = statusText;
+                headerEls.status.className = "live";
+                lastHeader.statusText = statusText;
+                lastHeader.statusClass = "live";
+            }
+            // Genuinely needs a per-frame write while pulsing - this is the
+            // one field real-time animation actually requires.
+            headerEls.status.style.opacity = String(pulseAlpha());
         } else {
-            statusEl.textContent = t("map.offAirport");
-            statusEl.className = "off";
-            statusEl.style.opacity = "1";
+            const statusText = t("map.offAirport");
+            if (statusText !== lastHeader.statusText || lastHeader.statusClass !== "off") {
+                headerEls.status.textContent = statusText;
+                headerEls.status.className = "off";
+                headerEls.status.style.opacity = "1";
+                lastHeader.statusText = statusText;
+                lastHeader.statusClass = "off";
+            }
         }
-    } else {
-        statusEl.textContent = "";
+    } else if (lastHeader.statusText !== "") {
+        headerEls.status.textContent = "";
+        lastHeader.statusText = "";
+        lastHeader.statusClass = null;
     }
 
-    document.getElementById("no-route-badge").style.display = mapData && !mapData.hasTaxiRouteNetwork ? "block" : "none";
-    document.getElementById("zoom-pct").textContent = Math.round(zoom * 100) + "%";
-    document.getElementById("clear-route-btn").style.display =
+    const noRouteDisplay = mapData && !mapData.hasTaxiRouteNetwork ? "block" : "none";
+    if (noRouteDisplay !== lastHeader.noRouteDisplay) {
+        headerEls.noRouteBadge.style.display = noRouteDisplay;
+        lastHeader.noRouteDisplay = noRouteDisplay;
+    }
+
+    const zoomPct = Math.round(zoom * 100) + "%";
+    if (zoomPct !== lastHeader.zoomPct) { headerEls.zoomPct.textContent = zoomPct; lastHeader.zoomPct = zoomPct; }
+
+    const clearRouteDisplay =
         mapData && mapData.hasTaxiRouteNetwork && routeSelection.edgeIndices.length > 0 ? "inline-block" : "none";
+    if (clearRouteDisplay !== lastHeader.clearRouteDisplay) {
+        headerEls.clearRouteBtn.style.display = clearRouteDisplay;
+        lastHeader.clearRouteDisplay = clearRouteDisplay;
+    }
 }
 
 let lastToScreen = null;
