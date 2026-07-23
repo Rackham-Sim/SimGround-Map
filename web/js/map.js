@@ -1,10 +1,8 @@
 // Ground map canvas - ported from PanelMap.cpp's ImDrawList rendering to
 // Canvas 2D. Screen-space math (bounds/projection/ToScreen, click hit
-// testing, parking clustering, rotated runway-end labels) mirrors that file
-// line-for-line since both are y-down screen coordinate systems. See
-// NOTES.md (section 27) for the one intentional gap (taxiwayChainLabels
-// isn't in the API, so zoomed-in per-chain signage isn't replicated - every
-// taxiway always shows one label at its own midpoint).
+// testing, parking clustering, rotated runway-end labels, zoom-dependent
+// taxiway signage) mirrors that file line-for-line since both are y-down
+// screen coordinate systems.
 import { api } from "./api.js";
 import { buildRunwayUsage } from "./atis.js";
 import { t } from "./i18n.js";
@@ -29,6 +27,12 @@ const EDGE_HIT_RADIUS_TOUCH_PX = 16;
 // line (real-usage report: a just-selected chain not highlighting at all).
 const NODE_CAPTURE_RADIUS_M = 25;
 const PARKING_CLUSTER_GRID_PX = 30;
+// Mirrors PanelMap.cpp's kTaxiwaySegmentLabelZoomThreshold - below this,
+// one label per taxiway NAME (taxiwayNameLabels); at/above it, one label
+// per real junction-to-junction chain (taxiwayChainLabels). Both lists are
+// server-computed via real chain-connectivity walks (AirportDatabase.cpp),
+// not derived here from any one taxiway segment's own endpoints.
+const TAXIWAY_SEGMENT_LABEL_ZOOM_THRESHOLD = 2;
 
 const canvas = document.getElementById("map-canvas");
 const wrap = document.getElementById("map-canvas-wrap");
@@ -549,24 +553,30 @@ function render() {
         ctx.lineCap = "butt";
     }
 
-    // Taxiway signs - one per taxiway name at that segment's own midpoint
-    // (see the file header comment re: taxiwayChainLabels not being
-    // available over the API).
+    // Taxiway signs - zoom-dependent, mirrors PanelMap.cpp: zoomed out shows
+    // exactly one label per taxiway NAME so a long multi-chain taxiway
+    // doesn't repeat its sign down its whole length; zoomed in past
+    // TAXIWAY_SEGMENT_LABEL_ZOOM_THRESHOLD switches to one label per real
+    // junction-to-junction chain instead, matching how much detail is
+    // actually visible at that scale.
     ctx.font = "12px 'Cousine', monospace";
-    for (const t of mapData.taxiways) {
-        if (!t.label) continue;
-        const a = toScreen(t.x1, t.y1);
-        const b = toScreen(t.x2, t.y2);
-        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-        const textW = ctx.measureText(t.label).width;
+    const drawTaxiwaySign = (wx, wy, label) => {
+        const p = toScreen(wx, wy);
+        const textW = ctx.measureText(label).width;
         const padX = 4, padY = 2;
         const textH = 12;
         ctx.fillStyle = "#000000";
-        ctx.fillRect(mx - textW / 2 - padX, my - textH / 2 - padY, textW + padX * 2, textH + padY * 2);
+        ctx.fillRect(p.x - textW / 2 - padX, p.y - textH / 2 - padY, textW + padX * 2, textH + padY * 2);
         ctx.fillStyle = "#ffdd00";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(t.label, mx, my + 1);
+        ctx.fillText(label, p.x, p.y + 1);
+    };
+    const taxiwayLabelSource = zoom >= TAXIWAY_SEGMENT_LABEL_ZOOM_THRESHOLD
+        ? mapData.taxiwayChainLabels
+        : mapData.taxiwayNameLabels;
+    for (const l of taxiwayLabelSource || []) {
+        drawTaxiwaySign(l.x, l.y, l.label);
     }
 
     // Runway-end numbers (and their DEP/ARR/closed dots), drawn now rather
