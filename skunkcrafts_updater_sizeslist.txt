@@ -1,0 +1,16 @@
+web/assets/aircraft-icon.png|1065
+web/assets/wind-arrow-icon.png|911
+web/css/style.css|14595
+web/fonts/Cousine-Regular.ttf|43912
+web/fonts/Roboto-Medium.ttf|162588
+web/index.html|7617
+web/js/airports.js|7742
+web/js/api.js|2456
+web/js/app.js|16217
+web/js/atis.js|5024
+web/js/gps.js|813
+web/js/i18n.js|17884
+web/js/map.js|55024
+web/js/settings.js|6884
+web/README.md|1153
+win.xpl|1866752

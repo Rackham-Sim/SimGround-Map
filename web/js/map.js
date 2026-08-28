@@ -59,7 +59,7 @@ let icao = "";
 let mapData = null; // last GET /api/airport/{icao}/map body
 let taxiEdges = null; // full indexed edge list from GET .../taxi-network, or null
 let routeSelection = { edgeIndices: [], nodeSequence: [], edges: [], nextRequiredNodeIndex: 1 };
-let liveAircraft = null; // {lat, lon, groundSpeedKt, headingDeg, headingMagDeg, onAirport, onGround} from SSE
+let liveAircraft = null; // {lat, lon, groundSpeedKt, headingDeg, headingMagDeg, onAirport, onGround, traffic} from SSE
 let projectedAircraft = null; // {x, y} derived from liveAircraft + mapData.origin*
 let atisForActiveAirport = null; // AtisResult for `icao`, or null if not fetched - drives the DEP/ARR/closed runway dots
 
@@ -300,6 +300,18 @@ function distancePointToSegment(p, a, b) {
 // DrawAircraftIcon's own halo technique in PanelMap.cpp exactly.
 const aircraftIconImg = new Image();
 let aircraftIconBlack = null;
+// Baked orange copy for the ground-traffic layer (see drawTrafficIcon
+// below) - same source-in composite technique as the black halo copy, just
+// a different fillStyle. Matches PanelMap.cpp's theme::kOrange tint on the
+// native side (DrawAircraftIcon's tint param), which needs no separate
+// baked asset since ImDrawList::AddImageQuad tints at draw time - Canvas 2D
+// has no equivalent, hence baking this copy once on load instead of a new
+// PNG asset. Orange (not amber) deliberately - see DrawAircraftIcon's own
+// comment on why: amber already means several other things on this map
+// (ARR dots/tags, OFF AIRPORT/NO ROUTE badges) and reads close to the
+// taxiway-sign yellow, both of which made traffic markers hard to pick out
+// at a glance in real usage.
+let aircraftIconOrange = null;
 aircraftIconImg.onload = () => {
     const c = document.createElement("canvas");
     c.width = aircraftIconImg.naturalWidth;
@@ -310,6 +322,16 @@ aircraftIconImg.onload = () => {
     cctx.fillStyle = "#000000";
     cctx.fillRect(0, 0, c.width, c.height);
     aircraftIconBlack = c;
+
+    const c2 = document.createElement("canvas");
+    c2.width = aircraftIconImg.naturalWidth;
+    c2.height = aircraftIconImg.naturalHeight;
+    const cctx2 = c2.getContext("2d");
+    cctx2.drawImage(aircraftIconImg, 0, 0);
+    cctx2.globalCompositeOperation = "source-in";
+    cctx2.fillStyle = "#FF6D00"; // theme::kOrange's hex - keep native/web in sync
+    cctx2.fillRect(0, 0, c2.width, c2.height);
+    aircraftIconOrange = c2;
 };
 aircraftIconImg.src = "assets/aircraft-icon.png";
 
@@ -329,20 +351,48 @@ let windArrowIconLoaded = false;
 windArrowIconImg.onload = () => { windArrowIconLoaded = true; };
 windArrowIconImg.src = "assets/wind-arrow-icon.png";
 
-function drawAircraftIcon(x, y, headingDeg) {
-    if (!aircraftIconBlack) {
-        return; // image still loading (first frame or two) - skip rather than draw a placeholder shape
+// Shared silhouette/halo draw, parameterized by fill image and alpha -
+// mirrors PanelMap.cpp's DrawAircraftIcon's own tint+alpha parameterization
+// (Canvas 2D has no per-draw tint like ImDrawList::AddImageQuad, hence a
+// separate pre-baked fill image per color instead of one texture + a tint
+// argument, but the "one shared drawing routine, parameterized" shape is
+// otherwise identical, so the two can't silently drift apart).
+function drawAircraftSilhouette(x, y, headingDeg, fillImage, alpha, sizeScale) {
+    if (!aircraftIconBlack || !fillImage) {
+        return; // image(s) still loading (first frame or two) - skip rather than draw a placeholder shape
     }
     const rad = (headingDeg * Math.PI) / 180;
-    const size = 32; // matches PanelMap.cpp's DrawAircraftIcon fixed 32x32 screen footprint
+    const size = 32 * sizeScale; // 32 matches PanelMap.cpp's DrawAircraftIcon fixed 32x32 screen footprint
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(rad);
-    for (const [ox, oy] of AIRCRAFT_ICON_HALO_OFFSETS) {
-        ctx.drawImage(aircraftIconBlack, -size / 2 + ox, -size / 2 + oy, size, size);
+    if (alpha < 1) {
+        ctx.globalAlpha = alpha;
     }
-    ctx.drawImage(aircraftIconImg, -size / 2, -size / 2, size, size);
+    for (const [ox, oy] of AIRCRAFT_ICON_HALO_OFFSETS) {
+        ctx.drawImage(aircraftIconBlack, -size / 2 + ox * sizeScale, -size / 2 + oy * sizeScale, size, size);
+    }
+    ctx.drawImage(fillImage, -size / 2, -size / 2, size, size);
     ctx.restore();
+}
+
+function drawAircraftIcon(x, y, headingDeg) {
+    drawAircraftSilhouette(x, y, headingDeg, aircraftIconImg, 1, 1);
+}
+
+// Other aircraft (X-Plane AI traffic, or online-network aircraft) - the
+// pre-baked orange copy for the fill instead of the plain white original,
+// slightly transparent and slightly smaller (matches PanelMap.cpp's
+// kTrafficIconAlpha/kTrafficIconSizeScale), so it stays visually distinct
+// from the user's own solid-white, full-size aircraft. No per-marker
+// smoothing (mirrors PanelMap.cpp's DrawMapPanel traffic loop) - this data
+// only refreshes at ~1Hz server-side and is a secondary situational-
+// awareness layer, not the safety-critical own-ship position.
+const TRAFFIC_ICON_ALPHA = 0.78; // ~200/255, matches native's kTrafficIconAlpha
+const TRAFFIC_ICON_SIZE_SCALE = 0.8; // matches native's kTrafficIconSizeScale
+
+function drawTrafficIcon(x, y, headingDeg) {
+    drawAircraftSilhouette(x, y, headingDeg, aircraftIconOrange, TRAFFIC_ICON_ALPHA, TRAFFIC_ICON_SIZE_SCALE);
 }
 
 function pulseAlpha() {
@@ -661,6 +711,21 @@ function render() {
         drawAircraftIcon(screenPos.x, screenPos.y, heading);
     } else {
         aircraftSmoothingValid = false; // re-snap next time it comes back into range
+    }
+
+    // Other aircraft - x/y arrive already projected into the same local
+    // meters space as mapData (see WebServer.cpp's TrafficToJson), so no
+    // client-side GeoProjection re-derivation is needed, just the same
+    // toScreen() every other map layer already uses. Falls back to
+    // mapData.traffic (the initial GET .../map snapshot) until the first
+    // SSE tick arrives, same pattern as aircraftOnAirport/headingDegForRotation
+    // above.
+    const trafficList = liveAircraft ? liveAircraft.traffic : mapData.traffic;
+    if (trafficList) {
+        for (const t of trafficList) {
+            const screenPos = toScreen(t.x, t.y);
+            drawTrafficIcon(screenPos.x, screenPos.y, t.headingDeg + rotationDeg);
+        }
     }
 
     drawScaleBar(w, h, effectiveScale);

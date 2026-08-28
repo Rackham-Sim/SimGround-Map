@@ -81,6 +81,7 @@ const DICTS = {
         "settings.connectedVia": "Connected via {host}",
         "settings.close": "Close",
         "settings.language": "Language",
+        "settings.showTraffic": "Show ground traffic",
 
         "footer.supportKofi": "Support on Ko-fi",
         "footer.newVersionAvailable": "New version available",
@@ -151,6 +152,7 @@ const DICTS = {
         "settings.connectedVia": "Connecté via {host}",
         "settings.close": "Fermer",
         "settings.language": "Langue",
+        "settings.showTraffic": "Afficher le trafic au sol",
 
         "footer.supportKofi": "Soutenir sur Ko-fi",
         "footer.newVersionAvailable": "Nouvelle version disponible",
@@ -221,6 +223,7 @@ const DICTS = {
         "settings.connectedVia": "Verbunden über {host}",
         "settings.close": "Schließen",
         "settings.language": "Sprache",
+        "settings.showTraffic": "Bodenverkehr anzeigen",
 
         "footer.supportKofi": "Auf Ko-fi unterstützen",
         "footer.newVersionAvailable": "Neue Version verfügbar",
@@ -291,6 +294,7 @@ const DICTS = {
         "settings.connectedVia": "Connesso tramite {host}",
         "settings.close": "Chiudi",
         "settings.language": "Lingua",
+        "settings.showTraffic": "Mostra traffico a terra",
 
         "footer.supportKofi": "Sostieni su Ko-fi",
         "footer.newVersionAvailable": "Nuova versione disponibile",
@@ -361,6 +365,7 @@ const DICTS = {
         "settings.connectedVia": "Conectado vía {host}",
         "settings.close": "Cerrar",
         "settings.language": "Idioma",
+        "settings.showTraffic": "Mostrar tráfico en tierra",
 
         "footer.supportKofi": "Apoyar en Ko-fi",
         "footer.newVersionAvailable": "Nueva versión disponible",

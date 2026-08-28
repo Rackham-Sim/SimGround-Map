@@ -75,6 +75,11 @@ export function initSettingsPanel({ onSettingsChanged }) {
     languageSelect.value = getLang();
     languageSelect.addEventListener("change", () => setLang(languageSelect.value));
 
+    const showTraffic = document.getElementById("show-traffic");
+    showTraffic.addEventListener("change", () => {
+        api.postSettings({ showGroundTraffic: showTraffic.checked });
+    });
+
     const opacitySlider = document.getElementById("opacity-slider");
     const opacityVal = document.getElementById("opacity-val");
     opacitySlider.addEventListener("input", () => {
@@ -147,6 +152,7 @@ export function initSettingsPanel({ onSettingsChanged }) {
         networkSelect.value = String(settings.atisNetwork);
         sayIntentionsRow.style.display = settings.atisNetwork === 2 ? "flex" : "none";
         apiKeyInput.value = settings.sayIntentionsApiKey || "";
+        showTraffic.checked = !!settings.showGroundTraffic;
         webEnabled.checked = !!settings.webInterfaceEnabled;
         webPort.value = settings.webInterfacePort;
         applyAccentAndOpacity(settings);
