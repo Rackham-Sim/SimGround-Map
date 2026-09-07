@@ -141,6 +141,23 @@ initMapPanel({
         await api.clearTaxiRoute(icao);
         refreshRouteSelectionNow();
     },
+    onGateClicked: async (gate) => {
+        const icao = getActiveIcao();
+        if (!icao) return;
+        if (!window.confirm(t("map.assignGatePrompt", { gate }))) return;
+        await api.assignGate(icao, gate);
+        // The result surfaces via the next /map poll's siGate.actionMessage
+        // (rendered as a toast in map.js) - refresh sooner than the slow tick.
+        setTimeout(pollMap, 400);
+    },
+    // Manual gate selection (SayIntentions inactive) - pure local toggle, no
+    // confirmation needed (no network call, nothing to confirm).
+    onGateSelected: async (parkingIndex) => {
+        const icao = getActiveIcao();
+        if (!icao) return;
+        await api.selectGate(icao, parkingIndex);
+        setTimeout(pollMap, 400);
+    },
 });
 const settingsPanel = initSettingsPanel({
     onSettingsChanged: (settings) => {
@@ -167,6 +184,14 @@ async function pollAirports() {
         }
         setConnStatus(true, t("common.connected"));
         lastAirportsBody = res.body;
+        // Re-sync from the live setting every poll tick - the one-time
+        // /api/settings fetch at init() only sees the network as of page
+        // load; a change made elsewhere (natively, or another tab) would
+        // otherwise leave this tab showing a stale network name in "No ATIS
+        // (...)" indefinitely (real user report).
+        if (typeof res.body.atisNetwork === "number") {
+            atisNetwork = res.body.atisNetwork;
+        }
 
         // Reconcile against the server's own active airport - see
         // localSelectionPendingSince's comment for why this is the fix for
@@ -296,6 +321,11 @@ async function loadMapNow(icao) {
 let pollAllBusy = false;
 async function pollAll() {
     if (pollAllBusy) return;
+    // Nothing on this page is visible while the tab is backgrounded (the rAF
+    // render loop is already parked by the browser); skip the poll +
+    // ATIS-fetch round-trips until it comes back. visibilitychange (below)
+    // fires an immediate catch-up poll on return.
+    if (typeof document !== "undefined" && document.hidden) return;
     pollAllBusy = true;
     try {
         await pollAirports();
@@ -357,6 +387,11 @@ async function init() {
     }
     pollAll();
     setInterval(pollAll, POLL_MS);
+    // Catch up immediately when the tab is refocused rather than waiting out
+    // the next POLL_MS tick.
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) pollAll();
+    });
 }
 
 init();

@@ -40,6 +40,9 @@ export function applyAccentAndOpacity(settings) {
     const hex = rgbFloatToHex(settings.accentR, settings.accentG, settings.accentB);
     document.documentElement.style.setProperty("--accent", hex);
     document.documentElement.style.setProperty("--opacity", settings.opacity);
+    // Let the map canvas refresh its cached CSS custom properties instead of
+    // re-reading them via getComputedStyle() every render frame.
+    window.dispatchEvent(new CustomEvent("sgm-cssvars-changed"));
 }
 
 export function initSettingsPanel({ onSettingsChanged }) {
@@ -81,6 +84,22 @@ export function initSettingsPanel({ onSettingsChanged }) {
         api.postSettings({ showGroundTraffic: showTraffic.checked });
     });
 
+    // Taxi guidance ribbon. The HUD is a native-only sim overlay - its
+    // settings live in the in-sim panel, not here.
+    const guidanceToggle = document.getElementById("taxi-guidance");
+    const guidanceUnits = document.getElementById("guidance-units");
+    const guidanceUnitsRow = document.getElementById("guidance-units-row");
+    const setGuidanceRows = () => {
+        guidanceUnitsRow.style.display = guidanceToggle.checked ? "flex" : "none";
+    };
+    guidanceToggle.addEventListener("change", () => {
+        api.postSettings({ showTaxiGuidance: guidanceToggle.checked });
+        setGuidanceRows();
+    });
+    guidanceUnits.addEventListener("change", () => {
+        api.postSettings({ taxiGuidanceUnitsFeet: Number(guidanceUnits.value) });
+    });
+
     const opacitySlider = document.getElementById("opacity-slider");
     const opacityVal = document.getElementById("opacity-val");
     opacitySlider.addEventListener("input", () => {
@@ -120,15 +139,33 @@ export function initSettingsPanel({ onSettingsChanged }) {
 
     const networkSelect = document.getElementById("atis-network");
     const sayIntentionsRow = document.getElementById("sayintentions-row");
+    const sayIntentionsGateRow = document.getElementById("sayintentions-gate-row");
+    const sayIntentionsTaxiRow = document.getElementById("sayintentions-taxi-row");
+    const setSayIntentionsRows = (idx) => {
+        const shown = idx === 2 ? "flex" : "none";
+        sayIntentionsRow.style.display = shown;
+        sayIntentionsGateRow.style.display = shown;
+        sayIntentionsTaxiRow.style.display = shown;
+    };
     networkSelect.addEventListener("change", () => {
         const idx = Number(networkSelect.value);
         api.postSettings({ atisNetwork: idx });
-        sayIntentionsRow.style.display = idx === 2 ? "flex" : "none";
+        setSayIntentionsRows(idx);
     });
 
     const apiKeyInput = document.getElementById("sayintentions-key");
     apiKeyInput.addEventListener("change", () => {
         api.postSettings({ sayIntentionsApiKey: apiKeyInput.value });
+    });
+
+    const siGateInput = document.getElementById("sayintentions-gate");
+    siGateInput.addEventListener("change", () => {
+        api.postSettings({ showSayIntentionsGate: siGateInput.checked });
+    });
+
+    const siTaxiInput = document.getElementById("sayintentions-taxi");
+    siTaxiInput.addEventListener("change", () => {
+        api.postSettings({ showSayIntentionsTaxiRoute: siTaxiInput.checked });
     });
 
     const webEnabled = document.getElementById("web-enabled");
@@ -174,9 +211,14 @@ export function initSettingsPanel({ onSettingsChanged }) {
         highlightSwatch(rgbFloatToHex(settings.accentR, settings.accentG, settings.accentB));
         userIdInput.value = settings.simbriefUserId || "";
         networkSelect.value = String(settings.atisNetwork);
-        sayIntentionsRow.style.display = settings.atisNetwork === 2 ? "flex" : "none";
+        setSayIntentionsRows(settings.atisNetwork);
         apiKeyInput.value = settings.sayIntentionsApiKey || "";
+        siGateInput.checked = settings.showSayIntentionsGate !== false;
+        siTaxiInput.checked = settings.showSayIntentionsTaxiRoute !== false;
         showTraffic.checked = !!settings.showGroundTraffic;
+        guidanceToggle.checked = settings.showTaxiGuidance !== false;
+        guidanceUnits.value = String(settings.taxiGuidanceUnitsFeet || 0);
+        setGuidanceRows();
         webEnabled.checked = !!settings.webInterfaceEnabled;
         webPort.value = settings.webInterfacePort;
         applyAccentAndOpacity(settings);

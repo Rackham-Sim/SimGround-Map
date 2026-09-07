@@ -3,7 +3,7 @@
 // DrawRunwayChipsAt. See NOTES.md (section 27).
 import { api } from "./api.js";
 import { atisBadgeState, renderAtisPopup, renderRunwayChips } from "./atis.js";
-import { t } from "./i18n.js";
+import { getLang, t } from "./i18n.js";
 
 let onSelectIcao = () => {};
 
@@ -14,7 +14,7 @@ function makeEmptyCard() {
     return card;
 }
 
-function makeCard(entry, { selected, atis, networkIndex, deletable, onDelete }) {
+function makeCard(entry, { selected, atis, networkIndex, deletable, onDelete, gate }) {
     const card = document.createElement("div");
     card.className = "airport-card" + (selected ? " selected" : "");
 
@@ -55,6 +55,16 @@ function makeCard(entry, { selected, atis, networkIndex, deletable, onDelete }) 
         chips.className = "runway-chips";
         card.appendChild(chips);
         renderRunwayChips(chips, atis);
+    }
+
+    // SayIntentions-assigned gate chip. Accent when it's also pinned on the
+    // map; amber "?" when SI named a gate the map couldn't locate (this chip
+    // is then the only place it shows).
+    if (gate && gate.label) {
+        const gc = document.createElement("span");
+        gc.className = "gate-chip" + (gate.resolved ? "" : " unresolved");
+        gc.textContent = "GATE " + gate.label + (gate.showQuestion ? " ?" : "");
+        card.appendChild(gc);
     }
 
     card.addEventListener("click", () => onSelectIcao(entry.icao));
@@ -147,14 +157,53 @@ export function initAirportsPanel({ onSelectIcao: selectCb }) {
 
 // Renders the whole panel from the latest /api/airports response + an
 // icao->AtisResult|null map (null/undefined = not fetched yet, see atis.js).
+// Signature of everything the panel renders from - lets the 1.5s poll skip
+// the full innerHTML="" teardown + rebuild of all three card containers
+// (a whole-panel layout each time) when nothing actually changed, which is
+// the common case in cruise. JSON.stringify of a handful of small objects
+// is far cheaper than the DOM rebuild it guards.
+let lastPanelSig = null;
 export function renderAirportsPanel(flight, atisByIcao, networkIndex, selectedIcao) {
     document.getElementById("fetch-error").textContent = flight.fetchError || "";
+
+    const planIcaos = icaosInPlan(flight);
+    const atisSlice = {};
+    for (const ic of planIcaos) atisSlice[ic] = atisByIcao[ic] || null;
+    const sig = JSON.stringify({
+        lang: getLang(),
+        fetchError: flight.fetchError || "",
+        assignedGate: flight.assignedGate || null,
+        networkIndex,
+        selectedIcao,
+        dep: flight.dep || null,
+        dest: flight.dest || null,
+        alternates: flight.alternates || [],
+        atis: atisSlice,
+    });
+    const atisModal = document.getElementById("atis-modal");
+    if (sig === lastPanelSig) {
+        // Contents are unchanged, but still keep an open ATIS popup fresh.
+        if (atisModalIcao && atisByIcao[atisModalIcao] && !atisModal.classList.contains("hidden")) {
+            renderAtisPopup(document.getElementById("atis-modal-content"), atisByIcao[atisModalIcao], networkIndex);
+        }
+        return;
+    }
+    lastPanelSig = sig;
+
+    // SayIntentions-assigned gate, tied to one airport (see WebServer.cpp).
+    // The "?" is only added on that airport's own card when it's the one on
+    // the map (amber elsewhere just means "open this airport to see it").
+    const ag = flight.assignedGate;
+    const gateFor = (icao) =>
+        ag && ag.icao === icao
+            ? { label: ag.label, resolved: ag.resolved, showQuestion: !ag.resolved && ag.icao === selectedIcao }
+            : null;
 
     const depContainer = document.getElementById("dep-card");
     depContainer.innerHTML = "";
     depContainer.appendChild(
         flight.dep && flight.dep.icao
-            ? makeCard(flight.dep, { selected: flight.dep.icao === selectedIcao, atis: atisByIcao[flight.dep.icao], networkIndex, deletable: false })
+            ? makeCard(flight.dep, { selected: flight.dep.icao === selectedIcao, atis: atisByIcao[flight.dep.icao], networkIndex, deletable: false, gate: gateFor(flight.dep.icao) })
             : makeEmptyCard()
     );
 
@@ -162,7 +211,7 @@ export function renderAirportsPanel(flight, atisByIcao, networkIndex, selectedIc
     destContainer.innerHTML = "";
     destContainer.appendChild(
         flight.dest && flight.dest.icao
-            ? makeCard(flight.dest, { selected: flight.dest.icao === selectedIcao, atis: atisByIcao[flight.dest.icao], networkIndex, deletable: false })
+            ? makeCard(flight.dest, { selected: flight.dest.icao === selectedIcao, atis: atisByIcao[flight.dest.icao], networkIndex, deletable: false, gate: gateFor(flight.dest.icao) })
             : makeEmptyCard()
     );
 
@@ -180,6 +229,7 @@ export function renderAirportsPanel(flight, atisByIcao, networkIndex, selectedIc
                     networkIndex,
                     deletable: !alt.isAuto,
                     onDelete: (icao) => api.deleteManualAirport(icao),
+                    gate: gateFor(alt.icao),
                 })
             );
         }

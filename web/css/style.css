@@ -405,6 +405,25 @@ input:focus, select:focus, button:focus {
 }
 .runway-chip .tag.dep { color: var(--green); }
 .runway-chip .tag.arr { color: var(--amber); }
+
+/* SayIntentions-assigned gate chip (see airports.js / PanelAirports.cpp) -
+   its own row, right-aligned, accent colour (never amber, so it doesn't
+   read as another ARR runway chip). Filled when it matched a real stand,
+   outline-only otherwise. */
+.gate-chip {
+    display: block;
+    width: fit-content;
+    margin: 8px 0 0 auto;
+    border-radius: var(--badge-radius);
+    border: 1px solid currentColor;
+    padding: 2px 6px;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+    background: color-mix(in srgb, currentColor 15%, transparent);
+    color: var(--accent);
+}
+.gate-chip.unresolved { background: transparent; }
 .runway-chip .tag.show { visibility: visible; }
 
 .runway-chip .box {

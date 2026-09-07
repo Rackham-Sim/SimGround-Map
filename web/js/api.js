@@ -33,6 +33,15 @@ export const api = {
     clickTaxiRouteEdge: (icao, edgeIndex) => req("POST", `/api/airport/${icao}/taxi-route`, { edgeIndex }),
     clearTaxiRoute: (icao) => req("POST", `/api/airport/${icao}/taxi-route`, { clear: true }),
 
+    // SayIntentions: request a specific gate at `icao`. The plugin performs
+    // the outbound call on its next frame; the result shows up in the next
+    // /map poll's siGate.actionMessage.
+    assignGate: (icao, gate) => req("POST", `/api/airport/${icao}/assign-gate`, { gate }),
+
+    // Manual gate selection (SayIntentions inactive) - a pure local toggle,
+    // no confirmation needed client-side either.
+    selectGate: (icao, parkingIndex) => req("POST", `/api/airport/${icao}/select-gate`, { parkingIndex }),
+
     getAtis: (icao) => req("GET", `/api/atis/${icao}`),
 
     getSettings: () => req("GET", "/api/settings"),

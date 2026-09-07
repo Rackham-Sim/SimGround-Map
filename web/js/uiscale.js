@@ -34,6 +34,9 @@ export function getUiScale() {
 
 export function applyUiScale() {
     document.documentElement.style.setProperty("--ui-zoom", String(current));
+    // The CSS `zoom` change moves/resizes the canvas on screen - tell the
+    // map to drop its cached layout metrics.
+    window.dispatchEvent(new CustomEvent("sgm-uiscale-changed"));
 }
 
 export function setUiScale(v) {

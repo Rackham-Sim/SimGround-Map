@@ -62,6 +62,9 @@ let routeSelection = { edgeIndices: [], nodeSequence: [], edges: [], nextRequire
 let liveAircraft = null; // {lat, lon, groundSpeedKt, headingDeg, headingMagDeg, onAirport, onGround, traffic} from SSE
 let projectedAircraft = null; // {x, y} derived from liveAircraft + mapData.origin*
 let atisForActiveAirport = null; // AtisResult for `icao`, or null if not fetched - drives the DEP/ARR/closed runway dots
+// buildRunwayUsage() (regex split + array scans) result, recomputed only
+// when the ATIS payload changes rather than every render frame.
+let runwayUsageForActiveAirport = null;
 
 // Smoothed aircraft ICON position/heading - ported from PanelMap.cpp's
 // gSmoothedAircraftPos (native parity, same technique/tau). projectedAircraft
@@ -101,6 +104,7 @@ function updateTrackButtons() {
 function setTrackMode(mode) {
     trackMode = trackMode === mode ? "off" : mode;
     updateTrackButtons();
+    requestRender();
 }
 
 // Camera smoothing while tracking - the underlying aircraft position/
@@ -126,6 +130,21 @@ function angleLerpDeg(from, to, alpha) {
 
 let onEdgeClicked = () => {};
 let onClearRoute = () => {};
+let onGateClicked = () => {};
+let onGateSelected = () => {};
+
+const PARKING_HIT_RADIUS_PX = 8;
+const PARKING_HIT_RADIUS_TOUCH_PX = 16;
+
+// measureText() cache for taxiway-sign labels - the font is fixed and each
+// airport's label set is small and static, but drawTaxiwaySign runs per
+// sign per frame. Cleared in setMapData (new airport) and once the webfont
+// finishes loading (so any width measured against the fallback font is
+// dropped).
+const signWidthCache = new Map();
+if (typeof document !== "undefined" && document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => signWidthCache.clear());
+}
 
 // getComputedStyle() forces a synchronous style recalculation - cheap to
 // call once, expensive if called per-drawn-element (real-usage report: the
@@ -153,7 +172,31 @@ function routeHighlightColor() {
     return accent === "#ffffff" ? "#00e5ff" : accent;
 }
 
+// resizeCanvasToDisplaySize() reads wrap.clientWidth/Height AND
+// getBoundingClientRect() - three synchronous layout reads, every frame of
+// the 60fps render loop, for values that only change on a resize, a
+// devicePixelRatio change (browser zoom) or an Interface-scale change. Cache
+// the result and only recompute when one of those fires (see
+// invalidateLayout / the listeners in initMapPanel).
+let layoutDirty = true;
+let sizeCache = { w: 1, h: 1, sx: 1, sy: 1 };
+// getBoundingClientRect() of the canvas, cached for the same reasons -
+// canvasRelativePos() runs on every pointermove during a pan/rotate drag.
+let canvasRectCache = null;
+
+function invalidateLayout() {
+    layoutDirty = true;
+    canvasRectCache = null;
+}
+
+function canvasRect() {
+    if (!canvasRectCache) canvasRectCache = canvas.getBoundingClientRect();
+    return canvasRectCache;
+}
+
 function resizeCanvasToDisplaySize() {
+    if (!layoutDirty) return sizeCache;
+    layoutDirty = false;
     const dpr = window.devicePixelRatio || 1;
     // Logical drawing size (CSS px, before any CSS `zoom` from the
     // "Interface scale" setting) - everything below draws in this space.
@@ -172,10 +215,19 @@ function resizeCanvasToDisplaySize() {
     // Maps the logical (w,h) coordinate space onto the backing store.
     const sx = w > 0 ? bw / w : dpr;
     const sy = h > 0 ? bh / h : dpr;
-    return { w, h, sx, sy };
+    sizeCache = { w, h, sx, sy };
+    return sizeCache;
 }
 
-function computeBounds(map, includeAircraft) {
+// Bounding box of the airport's static geometry (runways + taxiways +
+// parking) - constant for a given map payload, but computeBounds runs every
+// frame. Cache it keyed on the payload object identity (setMapData swaps in
+// a fresh object each poll), so the potentially-thousands-of-segments scan
+// happens once per poll instead of ~60x/second.
+let staticBoundsCache = null;
+let staticBoundsFor = null;
+function computeStaticBounds(map) {
+    if (staticBoundsFor === map && staticBoundsCache) return staticBoundsCache;
     let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
     const add = (x, y) => {
         minX = Math.min(minX, x); maxX = Math.max(maxX, x);
@@ -184,8 +236,17 @@ function computeBounds(map, includeAircraft) {
     for (const r of map.runways) { add(r.x1, r.y1); add(r.x2, r.y2); }
     for (const t of map.taxiways) { add(t.x1, t.y1); add(t.x2, t.y2); }
     for (const p of map.parking) { add(p.x, p.y); }
+    staticBoundsCache = { minX, minY, maxX, maxY };
+    staticBoundsFor = map;
+    return staticBoundsCache;
+}
+
+function computeBounds(map, includeAircraft) {
+    const s = computeStaticBounds(map);
+    let minX = s.minX, minY = s.minY, maxX = s.maxX, maxY = s.maxY;
     if (includeAircraft && projectedAircraft) {
-        add(projectedAircraft.x, projectedAircraft.y);
+        minX = Math.min(minX, projectedAircraft.x); maxX = Math.max(maxX, projectedAircraft.x);
+        minY = Math.min(minY, projectedAircraft.y); maxY = Math.max(maxY, projectedAircraft.y);
     }
     if (minX > maxX) { minX = -1; maxX = 1; minY = -1; maxY = 1; }
     return { minX: minX - MARGIN_M, minY: minY - MARGIN_M, maxX: maxX + MARGIN_M, maxY: maxY + MARGIN_M };
@@ -410,6 +471,29 @@ function pulseAlpha() {
     return 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(performance.now() / 1000 * 3));
 }
 
+// Idle-render gate. The rAF loop (see initMapPanel) skips render() entirely
+// when nothing on screen is animating and no state has changed since the
+// last frame - a static view (the map left open on a second monitor during
+// cruise, say) then costs ~0 instead of a full canvas repaint 60x/second.
+//   - requestRender() forces exactly one frame (called by every state
+//     setter / input handler / layout or theme change).
+//   - isAnimating() keeps the loop at full frame rate while anything is
+//     actually moving (aircraft on the field, camera tracking, an active
+//     gesture, the pulsing/spinning gate ring).
+//   - a 500 ms heartbeat renders anyway, so a missed requestRender() can
+//     never freeze the view for longer than that.
+let renderRequested = true;
+const IDLE_HEARTBEAT_MS = 500;
+function requestRender() { renderRequested = true; }
+function isAnimating() {
+    if (!mapData) return false;
+    const onAirport = !!(liveAircraft ? liveAircraft.onAirport : mapData.aircraftOnAirport);
+    return onAirport                          // GPS-LIVE badge pulse + aircraft position/heading easing
+        || trackMode !== "off"                // camera tracking ease
+        || pointers.size > 0 || !!dragStart   // active pan / zoom / rotate gesture
+        || !!(mapData.assignedGate && mapData.assignedGate.valid); // breathing / spinning gate ring
+}
+
 function render() {
     const { w, h, sx, sy } = resizeCanvasToDisplaySize();
     ctx.setTransform(sx, 0, 0, sy, 0, 0);
@@ -430,7 +514,6 @@ function render() {
         return;
     }
     if (placeholder.style.display !== "none") placeholder.style.display = "none";
-    refreshCssCache();
 
     if (icao !== lastIcaoForView) {
         lastIcaoForView = icao;
@@ -502,14 +585,13 @@ function render() {
     };
     const effectiveScale = proj.scale * zoom;
     lastToScreen = toScreen;
+    lastClusterProject = clusterProject;
     lastEffectiveScale = effectiveScale;
 
     // Runway usage from the currently displayed airport's ATIS, if any real
     // data has been fetched - see setAtisForActiveAirport(). Drives the
     // DEP/ARR/closed dots drawn alongside each end's number, below.
-    const runwayUsage = (atisForActiveAirport && atisForActiveAirport.success && atisForActiveAirport.available)
-        ? buildRunwayUsage(atisForActiveAirport)
-        : null;
+    const runwayUsage = runwayUsageForActiveAirport;
 
     // Runway pavement only here - end-number labels (and their DEP/ARR/
     // closed dots) are deferred until after the taxiway lines/signs below
@@ -569,6 +651,37 @@ function render() {
         ctx.stroke();
     }
 
+    // SayIntentions taxi route overlay (flight.json taxi_path, projected by
+    // the plugin) - a reference layer, NOT the planner. Mirrors PanelMap.cpp:
+    // same solid accent line as the manual route, drawn under it; progressive
+    // erase from progressIdx with the active segment truncated to the
+    // aircraft.
+    const sr = mapData.siTaxiRoute;
+    if (sr && sr.valid && Array.isArray(sr.points) && sr.points.length >= 2) {
+        const start = Math.min(Math.max(sr.progressIdx | 0, 0), sr.points.length - 1);
+        const acPos = aircraftOnAirport
+            ? (projectedAircraft || (mapData.aircraft ? { x: mapData.aircraft.x, y: mapData.aircraft.y } : null))
+            : null;
+        let fx = sr.points[start].x, fy = sr.points[start].y;
+        if (acPos && start + 1 < sr.points.length) {
+            const p = projectOntoSegment(acPos.x, acPos.y, sr.points[start].x, sr.points[start].y,
+                                          sr.points[start + 1].x, sr.points[start + 1].y);
+            if (Math.hypot(acPos.x - p.x, acPos.y - p.y) < NODE_CAPTURE_RADIUS_M) { fx = p.x; fy = p.y; }
+        }
+        const pts = [toScreen(fx, fy)];
+        for (let i = start + 1; i < sr.points.length; ++i) pts.push(toScreen(sr.points[i].x, sr.points[i].y));
+        if (pts.length >= 2) {
+            ctx.strokeStyle = routeHighlightColor();
+            ctx.lineWidth = Math.max(3, 6 * effectiveScale);
+            ctx.lineCap = "round";
+            ctx.lineJoin = "round";
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, pts[0].y);
+            for (let i = 1; i < pts.length; ++i) ctx.lineTo(pts[i].x, pts[i].y);
+            ctx.stroke();
+        }
+    }
+
     // Selected taxi route highlight - drawn on top of plain taxiway lines,
     // using the oriented edge list from GET .../taxi-route (server already
     // resolved chain/gap-fill logic, see api.js). GPS-linked progressive
@@ -579,6 +692,19 @@ function render() {
     // active segment locally using whatever aircraft position it already
     // has (prefers the live SSE-projected one, more current than the
     // polled snapshot) - no independent progress computation here.
+    // Hoisted above the route-highlight block below so the far-end
+    // truncation it drives (farCutIndex) can be computed before that loop
+    // runs - mirrors PanelMap.cpp.
+    const gd = mapData.guidance;
+
+    // Far-end route-highlight truncation anchor (HOLD SHORT / ARRIVE) -
+    // declared here, at this function's own top scope, rather than local to
+    // the route-drawing block below, so the aircraft-nose leash further down
+    // can also see where the highlight was actually cut and re-target to
+    // that point instead of dangling past the visible end of the line.
+    // Mirrors PanelMap.cpp.
+    let farCutIndex = -1, farCutX = 0, farCutY = 0;
+
     if (mapData.hasTaxiRouteNetwork && routeSelection.edges && routeSelection.edges.length > 0) {
         ctx.strokeStyle = routeHighlightColor();
         ctx.lineWidth = Math.max(3, 6 * effectiveScale);
@@ -587,9 +713,39 @@ function render() {
         const routeAircraftPos = aircraftOnAirport
             ? (projectedAircraft || (mapData.aircraft ? { x: mapData.aircraft.x, y: mapData.aircraft.y } : null))
             : null;
+
+        // Far-end truncation: when the route ends in a HOLD SHORT or an
+        // ARRIVE, the guidance payload carries the real anchor point
+        // (holdPoint / arrivePoint) - a point that lies exactly on one of
+        // this route's own edges. Find which edge that is; anything drawn
+        // past it isn't part of the route anymore per the guidance
+        // computation - fixes the manual-gate overshoot case (and, as a
+        // byproduct, the pre-existing HOLD SHORT overrun past the stop bar).
+        if (gd && gd.valid && gd.source === 1) {
+            let anchor = null;
+            if (gd.endsVerb === "holdShort" && gd.holdPoint) anchor = gd.holdPoint;
+            else if (gd.endsVerb === "arrive" && gd.arrivePoint) anchor = gd.arrivePoint;
+            if (anchor) {
+                let bestD = Infinity;
+                for (let i = 0; i < routeSelection.edges.length; ++i) {
+                    const e = routeSelection.edges[i];
+                    const fromNodeId = routeSelection.nodeSequence[i];
+                    let sx, sy, ex, ey;
+                    if (e.node1Id === fromNodeId) { sx = e.x1; sy = e.y1; ex = e.x2; ey = e.y2; }
+                    else { sx = e.x2; sy = e.y2; ex = e.x1; ey = e.y1; }
+                    const proj = projectOntoSegment(anchor.x, anchor.y, sx, sy, ex, ey);
+                    const d = Math.hypot(anchor.x - proj.x, anchor.y - proj.y);
+                    if (d < bestD) { bestD = d; farCutIndex = i; farCutX = anchor.x; farCutY = anchor.y; }
+                }
+            }
+        }
+
         for (let i = 0; i < routeSelection.edges.length; ++i) {
             if (i + 1 < nextRequiredNodeIndex) {
                 continue; // walked - erased
+            }
+            if (farCutIndex >= 0 && i > farCutIndex) {
+                continue; // past the HOLD SHORT / ARRIVE anchor - not drawn
             }
             const e = routeSelection.edges[i];
             const fromNodeId = routeSelection.nodeSequence[i];
@@ -604,11 +760,37 @@ function render() {
                     sx = proj.x; sy = proj.y;
                 }
             }
+            if (farCutIndex >= 0 && i === farCutIndex) {
+                ex = farCutX; ey = farCutY; // clamp the far end at the anchor
+            }
             const a = toScreen(sx, sy);
             const b = toScreen(ex, ey);
             ctx.beginPath();
             ctx.moveTo(a.x, a.y);
             ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+        }
+        ctx.lineCap = "butt";
+    }
+
+    // Runway hold-short bar - a red double line across the route at the real
+    // hold line (apt.dat row 1204's protected-zone boundary, else a geometric
+    // standoff). Mirrors PanelMap.cpp; covers planned + SI routes.
+    if (gd && gd.valid && gd.endsVerb === "holdShort" && gd.holdPoint) {
+        let dx = gd.holdPoint.dx || 0, dy = gd.holdPoint.dy || 0;
+        if (dx === 0 && dy === 0) dy = 1;
+        const px = -dy, py = dx, halfW = 9, back = 2.6;
+        const W = (ox, oy) => toScreen(gd.holdPoint.x + ox, gd.holdPoint.y + oy);
+        const th = Math.max(2.5, 4 * effectiveScale);
+        ctx.strokeStyle = "#ff4757";
+        ctx.lineWidth = th;
+        ctx.lineCap = "round";
+        for (const b of [0, -back]) {
+            const a1 = W(px * halfW + dx * b, py * halfW + dy * b);
+            const a2 = W(-px * halfW + dx * b, -py * halfW + dy * b);
+            ctx.beginPath();
+            ctx.moveTo(a1.x, a1.y);
+            ctx.lineTo(a2.x, a2.y);
             ctx.stroke();
         }
         ctx.lineCap = "butt";
@@ -623,7 +805,11 @@ function render() {
     ctx.font = "12px 'Cousine', monospace";
     const drawTaxiwaySign = (wx, wy, label) => {
         const p = toScreen(wx, wy);
-        const textW = ctx.measureText(label).width;
+        let textW = signWidthCache.get(label);
+        if (textW === undefined) {
+            textW = ctx.measureText(label).width;
+            signWidthCache.set(label, textW);
+        }
         const padX = 4, padY = 2;
         const textH = 12;
         ctx.fillStyle = "#000000";
@@ -663,10 +849,22 @@ function render() {
             if (!cl) { cl = { sumX: 0, sumY: 0, count: 0, firstIndex: i }; clusters.set(key, cl); }
             cl.sumX += c.x; cl.sumY += c.y; cl.count += 1;
         }
+        // While a SayIntentions gate is highlighted, fade EVERYTHING else
+        // parking-related - dots + labels AND the zoomed-out cluster markers
+        // (mirrors PanelMap.cpp).
+        const agData = mapData.assignedGate;
+        const fade = !!(agData && agData.valid);
+        const dotAlpha = fade ? 0.34 : 1;
+        const labelAlpha = fade ? 0.28 : 1;
+
         for (const cl of clusters.values()) {
             const cx = cl.sumX / cl.count, cy = cl.sumY / cl.count;
             if (cl.count === 1) {
+                if (fade && cl.firstIndex === agData.matchedParkingIndex) {
+                    continue; // the assigned stand - drawn in the highlight block
+                }
                 const p = mapData.parking[cl.firstIndex];
+                ctx.globalAlpha = dotAlpha;
                 ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2);
                 ctx.fillStyle = cssCache.border2;
                 ctx.fill();
@@ -676,9 +874,12 @@ function render() {
                 ctx.fillStyle = cssCache.text;
                 ctx.font = "11px 'Roboto Medium', sans-serif";
                 ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+                ctx.globalAlpha = labelAlpha;
                 ctx.fillText(p.label, cx + 7, cy - 7);
+                ctx.globalAlpha = 1;
             } else {
                 const r = 10;
+                ctx.globalAlpha = dotAlpha;
                 ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
                 ctx.fillStyle = cssCache.border2;
                 ctx.fill();
@@ -687,7 +888,78 @@ function render() {
                 ctx.font = "bold 12px 'Roboto Medium', sans-serif";
                 ctx.textAlign = "center"; ctx.textBaseline = "middle";
                 ctx.fillText(String(cl.count), cx, cy);
+                ctx.globalAlpha = 1;
             }
+        }
+    }
+
+    // SayIntentions-assigned gate highlight - drawn over the parking clusters
+    // so it stays visible even when its stand is inside a collapsed cluster,
+    // same reasoning as the runway-usage dots. Mirrors PanelMap.cpp.
+    const ag = mapData.assignedGate;
+    if (ag && ag.valid) {
+        const g = toScreen(ag.x, ag.y);
+        const col = routeHighlightColor();
+        const matched = ag.matchedParkingIndex >= 0;
+
+        // Breathing ring - same sine pulse shape as PanelMap.cpp / the GPS
+        // LIVE badge.
+        const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 1000 * 3.0);
+        const ringR = 9 + 3.5 * pulse;
+        ctx.strokeStyle = col;
+        ctx.globalAlpha = 0.43 + 0.5 * pulse;
+        if (matched) {
+            ctx.beginPath(); ctx.arc(g.x, g.y, 5, 0, Math.PI * 2);
+            ctx.fillStyle = cssCache.border2; ctx.globalAlpha = 1; ctx.fill();
+            ctx.strokeStyle = col; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(g.x, g.y, 5, 0, Math.PI * 2); ctx.stroke();
+            ctx.globalAlpha = 0.43 + 0.5 * pulse;
+            ctx.lineWidth = 2.5;
+            ctx.beginPath(); ctx.arc(g.x, g.y, ringR, 0, Math.PI * 2); ctx.stroke();
+        } else {
+            const spin = performance.now() / 1000 * 0.8;
+            ctx.lineWidth = 2.5;
+            ctx.setLineDash([ringR * 0.42, ringR * 0.42]);
+            ctx.lineDashOffset = -spin * ringR;
+            ctx.beginPath(); ctx.arc(g.x, g.y, ringR, 0, Math.PI * 2); ctx.stroke();
+            ctx.setLineDash([]); ctx.lineDashOffset = 0;
+        }
+        ctx.globalAlpha = 1;
+
+        // Compact pill - just the gate id (the pulsing ring says what it is).
+        let tag = ag.displayLabel || ag.label || "?";
+        if (!matched) tag += " ?";
+        ctx.font = "11px 'Roboto Medium', sans-serif";
+        ctx.textAlign = "left"; ctx.textBaseline = "middle";
+        const tw = ctx.measureText(tag).width;
+        const bx = g.x + 12, by = g.y - 9;
+        ctx.fillStyle = "rgba(8,10,16,0.9)";
+        ctx.fillRect(bx, by, tw + 8, 18);
+        ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+        ctx.strokeRect(bx, by, tw + 8, 18);
+        ctx.fillStyle = col;
+        ctx.fillText(tag, bx + 4, g.y + 1);
+    }
+
+    // Route-to-gate connector: for a MANUAL gate selection only (SI's own
+    // flight.json taxi_path already runs to the real gate, so this doesn't
+    // apply there - product decision). A straight line from the truncated/
+    // real route end (arrivePoint) to the gate marker itself, closing the
+    // visual gap the same "leash" reasoning the aircraft-nose connector below
+    // uses. Mirrors PanelMap.cpp.
+    if (ag && ag.valid && ag.manual && gd && gd.source === 1 && gd.arrivePointIsGate && gd.arrivePoint) {
+        const a = toScreen(gd.arrivePoint.x, gd.arrivePoint.y);
+        const b = toScreen(ag.x, ag.y);
+        const dx = b.x - a.x, dy = b.y - a.y;
+        if (dx * dx + dy * dy > 16) { // skip a redundant near-zero-length stub when already touching
+            ctx.strokeStyle = routeHighlightColor();
+            ctx.lineWidth = Math.max(2, 4 * effectiveScale);
+            ctx.lineCap = "round";
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+            ctx.lineCap = "butt";
         }
     }
 
@@ -719,6 +991,73 @@ function render() {
         // catching up to its target.
         const heading = smoothedAircraftHeadingDeg + rotationDeg;
         const screenPos = toScreen(smoothedAircraftPos.x, smoothedAircraftPos.y);
+
+        // "Leash": a short connector from the aircraft icon's own nose tip to
+        // the nearest point on the currently-highlighted route, closing the
+        // visual gap that opens up whenever the aircraft is further than
+        // NODE_CAPTURE_RADIUS_M from the route (the route-highlight blocks
+        // above only truncate the active edge back to the aircraft WITHIN
+        // that radius). Mirrors PanelMap.cpp's DrawMapPanel - see its own
+        // comment for the reasoning. Connects to whichever route is actually
+        // driving guidance right now (mapData.guidance.source: 1 = the
+        // interactive planned route, 2 = the SayIntentions overlay).
+        let nearestWorld = null;
+        const guidanceSource = mapData.guidance && mapData.guidance.source;
+        if (guidanceSource === 1 && routeSelection.edges && routeSelection.edges.length > 0) {
+            const nextRequiredNodeIndex = routeSelection.nextRequiredNodeIndex ?? 1;
+            if (nextRequiredNodeIndex >= 1 && nextRequiredNodeIndex <= routeSelection.edges.length) {
+                // Back to the original, single-"active"-edge projection - a
+                // real-usage report confirmed the wider all-remaining-edges
+                // search (tried in an earlier follow-up) actually regressed
+                // things: at a busy junction with several close taxiways it
+                // could snap onto the wrong nearby edge instead of the
+                // active one. The real remaining gap was the route
+                // highlight's far end being cut (see farCutIndex above)
+                // while the leash still targeted a point past that cut -
+                // handled below instead of by widening the search again.
+                // Mirrors PanelMap.cpp.
+                const activeAi = nextRequiredNodeIndex - 1;
+                if (farCutIndex >= 0 && activeAi > farCutIndex) {
+                    nearestWorld = { x: farCutX, y: farCutY };
+                } else {
+                    const activeEdge = routeSelection.edges[activeAi];
+                    const activeFromNodeId = routeSelection.nodeSequence[activeAi];
+                    let aasx, aasy, aaex, aaey;
+                    if (activeEdge.node1Id === activeFromNodeId) { aasx = activeEdge.x1; aasy = activeEdge.y1; aaex = activeEdge.x2; aaey = activeEdge.y2; }
+                    else { aasx = activeEdge.x2; aasy = activeEdge.y2; aaex = activeEdge.x1; aaey = activeEdge.y1; }
+                    if (farCutIndex >= 0 && activeAi === farCutIndex) {
+                        aaex = farCutX; aaey = farCutY; // same clamp the draw loop applies
+                    }
+                    nearestWorld = projectOntoSegment(mapData.aircraft.x, mapData.aircraft.y, aasx, aasy, aaex, aaey);
+                }
+            }
+        } else if (guidanceSource === 2 && sr && sr.valid && Array.isArray(sr.points) && sr.points.length >= 2) {
+            const start = Math.min(Math.max(sr.progressIdx | 0, 0), sr.points.length - 2);
+            nearestWorld = projectOntoSegment(mapData.aircraft.x, mapData.aircraft.y,
+                                               sr.points[start].x, sr.points[start].y,
+                                               sr.points[start + 1].x, sr.points[start + 1].y);
+        }
+        if (nearestWorld) {
+            // Nose tip: the same rotation drawAircraftSilhouette applies via
+            // ctx.rotate(rad) to its own icon draw, applied to the icon's
+            // local nose point (0,-16) - the image points "up" (toward -y)
+            // at heading 0, and 16 is drawAircraftSilhouette's own fixed
+            // screen-space half-extent (size 32) for the own-ship icon.
+            const rad = (heading * Math.PI) / 180;
+            const nose = { x: screenPos.x + 16 * Math.sin(rad), y: screenPos.y - 16 * Math.cos(rad) };
+            const nearestScreen = toScreen(nearestWorld.x, nearestWorld.y);
+            const dx = nearestScreen.x - nose.x, dy = nearestScreen.y - nose.y;
+            if (dx * dx + dy * dy > 16) { // skip a redundant near-zero-length stub when already touching
+                ctx.strokeStyle = routeHighlightColor();
+                ctx.lineWidth = Math.max(2, 4 * effectiveScale);
+                ctx.lineCap = "round";
+                ctx.beginPath();
+                ctx.moveTo(nose.x, nose.y);
+                ctx.lineTo(nearestScreen.x, nearestScreen.y);
+                ctx.stroke();
+            }
+        }
+
         drawAircraftIcon(screenPos.x, screenPos.y, heading);
     } else {
         aircraftSmoothingValid = false; // re-snap next time it comes back into range
@@ -742,6 +1081,28 @@ function render() {
     drawScaleBar(w, h, effectiveScale);
     drawPositionOverlay();
     drawCompassRose(w);
+
+    // Turn-by-turn taxi guidance - ribbon (wedged between the position
+    // overlay and compass rose, neither moves) or the frameless floating
+    // HUD. Mirrors PanelMap.cpp; reads mapData.guidance + mapData.guidancePrefs.
+    drawGuidance(w, h);
+    const ribbonShown = mapData.guidance && mapData.guidance.valid && guidancePrefs().ribbon;
+
+    // Transient result of the last assignGate attempt - the plugin clears it
+    // server-side after a few seconds, so this toast disappears on its own
+    // next poll. Centered near the top, mirrors PanelMap.cpp; nudged below
+    // the guidance ribbon when that's present.
+    const msg = mapData.siGate && mapData.siGate.actionMessage;
+    if (msg) {
+        ctx.font = "12px 'Roboto Medium', sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "top";
+        const tw = ctx.measureText(msg).width;
+        const toastY = ribbonShown ? 50 : 10;
+        ctx.fillStyle = "rgba(0,0,0,0.8)";
+        ctx.fillRect((w - tw) / 2 - 8, toastY, tw + 16, 22);
+        ctx.fillStyle = mapData.siGate.actionError ? "#ff5252" : "#69f0ae";
+        ctx.fillText(msg, w / 2, toastY + 5);
+    }
 }
 
 // Compass rose: an N/S/E/W ring plus a wind arrow, top-right corner (mirrors
@@ -879,6 +1240,310 @@ function drawScaleBar(w, h, scale) {
     ctx.fillText("500 m", x1, y1 - 8);
 }
 
+// ---- Taxi guidance ribbon (the HUD is native-only, over the sim) --------
+
+// Sharp turns reuse the plain turnLeft/turnRight text (only the arrow icon -
+// see GUIDANCE_ICON_FILE below - changes for a sharp turn, not the wording).
+const GUIDANCE_VERB_KEY = {
+    continue: "guidance.continue", bearLeft: "guidance.bearLeft", bearRight: "guidance.bearRight",
+    turnLeft: "guidance.turnLeft", turnRight: "guidance.turnRight",
+    sharpLeft: "guidance.turnLeft", sharpRight: "guidance.turnRight",
+    cross: "guidance.cross", holdShort: "guidance.holdShort", arrive: "guidance.arriveStand",
+};
+function formatDistanceParts(m, feet) {
+    if (feet) {
+        const ft = m * 3.28084;
+        if (ft >= 1500) return { num: (ft / 5280).toFixed(1), unit: "mi" };
+        return { num: String(Math.round(ft / 50) * 50), unit: "ft" };
+    }
+    if (m >= 1000) return { num: (m / 1000).toFixed(1), unit: "km" };
+    return { num: String(Math.round(m / 10) * 10), unit: "m" };
+}
+
+// User-supplied direction glyphs (web/assets/guidance/*.png, white on
+// transparent) - tinted at draw time, cached per colour. Fall back to the
+// vector shapes until an image has loaded.
+const GUIDANCE_ICON_FILE = {
+    continue: "straight",
+    bearLeft: "turn-left", turnLeft: "turn-left",
+    bearRight: "turn-right", turnRight: "turn-right",
+    sharpLeft: "sharp-left", sharpRight: "sharp-right",
+    cross: "cross", holdShort: "hold-short",
+};
+const guidanceIconImg = {};
+for (const f of new Set(Object.values(GUIDANCE_ICON_FILE))) {
+    const im = new Image();
+    im.onload = () => { im._ok = true; };
+    im.src = "assets/guidance/" + f + ".png";
+    guidanceIconImg[f] = im;
+}
+const guidanceTintCache = new Map();
+function tintedGuidanceIcon(file, color) {
+    const im = guidanceIconImg[file];
+    if (!im || !im._ok) return null;
+    const key = file + "|" + color;
+    let cv = guidanceTintCache.get(key);
+    if (!cv) {
+        cv = document.createElement("canvas");
+        cv.width = im.naturalWidth;
+        cv.height = im.naturalHeight;
+        const c2 = cv.getContext("2d");
+        c2.drawImage(im, 0, 0);
+        c2.globalCompositeOperation = "source-in";
+        c2.fillStyle = color;
+        c2.fillRect(0, 0, cv.width, cv.height);
+        guidanceTintCache.set(key, cv);
+    }
+    return cv;
+}
+
+function guidancePrefs() {
+    // Only `.ribbon` and `.unitsFeet` are actually read anywhere in this file
+    // - the HUD is native-only and never rendered here.
+    return (mapData && mapData.guidancePrefs) || { ribbon: true, unitsFeet: 0 };
+}
+
+function guidanceVerbColor(verb) {
+    if (verb === "cross") return "#ffb300";
+    if (verb === "holdShort") return "#ff4757";
+    if (verb === "arrive") return "#00e676";
+    return accentColor();
+}
+
+function guidanceText(verb, target) {
+    if (!verb || verb === "none") return "";
+    if (verb === "arrive" && !target) return t("guidance.arrive");
+    return t(GUIDANCE_VERB_KEY[verb] || "guidance.continue", { id: target || "" }).trim();
+}
+
+// Raw template ("TURN LEFT {id}") so the id can be drawn in the map's yellow
+// taxiway-sign colour, like the native ribbon.
+const TWY_YELLOW = "#ffdd00";
+function guidanceTemplate(verb) {
+    if (!verb || verb === "none") return "";
+    if (verb === "arrive") return t("guidance.arriveStand");
+    return t(GUIDANCE_VERB_KEY[verb] || "guidance.continue");
+}
+// Draws `tmpl` with the "{id}" slot in idColor and the rest in baseColor,
+// left-aligned from x at baseline y. Returns total advance width.
+function drawTemplated(x, y, tmpl, id, baseColor, idColor) {
+    const slot = tmpl.indexOf("{id}");
+    if (slot < 0) { ctx.fillStyle = baseColor; ctx.fillText(tmpl, x, y); return ctx.measureText(tmpl).width; }
+    const pre = tmpl.slice(0, slot), post = tmpl.slice(slot + 4);
+    let cx = x;
+    ctx.fillStyle = baseColor; ctx.fillText(pre, cx, y); cx += ctx.measureText(pre).width;
+    ctx.fillStyle = idColor; ctx.fillText(id, cx, y); cx += ctx.measureText(id).width;
+    ctx.fillStyle = baseColor; ctx.fillText(post, cx, y); cx += ctx.measureText(post).width;
+    return cx - x;
+}
+function templatedWidth(tmpl, id) {
+    const slot = tmpl.indexOf("{id}");
+    if (slot < 0) return ctx.measureText(tmpl).width;
+    return ctx.measureText(tmpl.slice(0, slot)).width + ctx.measureText(id).width + ctx.measureText(tmpl.slice(slot + 4)).width;
+}
+
+function formatGuidanceDistance(m, feet) {
+    const p = formatDistanceParts(m, feet);
+    return p.num + " " + p.unit;
+}
+
+// Bold vector direction glyph, box side `s` centred on (cx,cy), "ahead" = up.
+// Swapped for user PNGs later; this is the fallback.
+function drawGuidanceGlyph(cx, cy, s, verb, color) {
+    const iconFile = GUIDANCE_ICON_FILE[verb];
+    if (iconFile) {
+        const tc = tintedGuidanceIcon(iconFile, color);
+        if (tc) { ctx.drawImage(tc, cx - s / 2, cy - s / 2, s, s); return; }
+    }
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = Math.max(2.5, s * 0.155);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    const head = (tipX, tipY, dx, dy, size) => {
+        const l = Math.hypot(dx, dy) || 1;
+        dx /= l; dy /= l;
+        const px = -dy, py = dx;
+        const bx = tipX - dx * size, by = tipY - dy * size;
+        ctx.beginPath();
+        ctx.moveTo(tipX, tipY);
+        ctx.lineTo(bx + px * size * 0.62, by + py * size * 0.62);
+        ctx.lineTo(bx - px * size * 0.62, by - py * size * 0.62);
+        ctx.closePath();
+        ctx.fill();
+    };
+    const straight = () => {
+        ctx.beginPath();
+        ctx.moveTo(cx, cy + s * 0.46);
+        ctx.lineTo(cx, cy - s * 0.14);
+        ctx.stroke();
+        head(cx, cy - s * 0.44, 0, -1, s * 0.34);
+    };
+    const arc = (left, sharp) => {
+        const r = s * 0.4;
+        const sweep = (sharp ? 150 : 92) * Math.PI / 180;
+        const cxr = cx + (left ? -r : r), cyr = cy - s * 0.04;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy + s * 0.52);
+        ctx.lineTo(cx, cyr);
+        ctx.stroke();
+        const a0 = left ? 0 : Math.PI;
+        const a1 = left ? -sweep : Math.PI + sweep;
+        ctx.beginPath();
+        ctx.arc(cxr, cyr, r, a0, a1, left); // anticlockwise for left
+        ctx.stroke();
+        const tipX = cxr + r * Math.cos(a1), tipY = cyr + r * Math.sin(a1);
+        const dx = left ? Math.sin(a1) : -Math.sin(a1);
+        const dy = left ? -Math.cos(a1) : Math.cos(a1);
+        head(tipX + dx * s * 0.08, tipY + dy * s * 0.08, dx, dy, s * 0.32);
+    };
+    switch (verb) {
+        case "continue": straight(); break;
+        case "bearLeft": case "turnLeft": arc(true, false); break;
+        case "bearRight": case "turnRight": arc(false, false); break;
+        case "sharpLeft": arc(true, true); break;
+        case "sharpRight": arc(false, true); break;
+        case "cross": {
+            const b = s * 0.46;
+            ctx.beginPath();
+            ctx.moveTo(cx - b, cy - s * 0.20); ctx.lineTo(cx + b, cy - s * 0.20);
+            ctx.moveTo(cx - b, cy + s * 0.20); ctx.lineTo(cx + b, cy + s * 0.20);
+            ctx.stroke();
+            straight();
+            break;
+        }
+        case "holdShort":
+            ctx.beginPath();
+            ctx.moveTo(cx, cy + s * 0.48); ctx.lineTo(cx, cy - s * 0.06);
+            ctx.stroke();
+            ctx.fillRect(cx - s * 0.48, cy - s * 0.30, s * 0.96, s * 0.18);
+            break;
+        case "arrive":
+            ctx.beginPath(); ctx.arc(cx, cy, s * 0.42, 0, Math.PI * 2); ctx.stroke();
+            ctx.beginPath(); ctx.arc(cx, cy, s * 0.16, 0, Math.PI * 2); ctx.fill();
+            break;
+        default: break;
+    }
+    ctx.restore();
+}
+
+// The one instruction to show, resolved to template + id + colours + glyph.
+function resolveGuidance(g) {
+    if (g.notStarted) return { tmpl: t("guidance.startTaxi"), id: "", base: accentColor(), idCol: accentColor(), glyph: "none" };
+    if (g.offRoute) return { tmpl: t("guidance.offRoute"), id: "", base: "#ffb300", idCol: "#ffb300", glyph: "none" };
+    if (g.complete) return { tmpl: t("guidance.complete"), id: "", base: "#00e676", idCol: "#00e676", glyph: "arrive" };
+    if (g.verb === "arrive" && !g.target) return { tmpl: t("guidance.arrive"), id: "", base: "#00e676", idCol: "#00e676", glyph: "arrive" };
+    const base = guidanceVerbColor(g.verb);
+    const idCol = (g.verb === "cross" || g.verb === "holdShort") ? base : TWY_YELLOW;
+    return { tmpl: guidanceTemplate(g.verb), id: g.target || "", base, idCol, glyph: g.verb };
+}
+
+const LABEL_COL = "#c8d0e0"; // brighter than the old dim grey (real-usage: too faint)
+
+function drawGuidanceRibbon(w, h, pref) {
+    const g = mapData.guidance;
+    const ac = liveAircraft || (mapData ? mapData.aircraft : null);
+    const gs = ac ? ac.groundSpeedKt : 0;
+
+    const ins = resolveGuidance(g);
+    if (!ins.tmpl) return;
+    const showDist = !g.offRoute && !g.complete && !g.notStarted;
+    const atHold = g.verb === "holdShort" && g.distanceMeters < 6;
+    const distStr = !showDist ? ""
+        : atHold ? t("guidance.hold")
+        : g.distanceMeters < 16 ? "NOW"
+        : formatGuidanceDistance(g.distanceMeters, pref.unitsFeet);
+    let onLabel = g.onLeg ? t("guidance.on") : "";
+    const showThen = showDist && g.thenVerb && g.thenVerb !== "none";
+    let thenLabel = showThen ? t("guidance.then") : "";
+    const thenTmpl = showThen ? guidanceTemplate(g.thenVerb) : "";
+
+    const pad = 12, gap = 9, glyphBox = 19;
+    const instrFont = "13px 'Roboto Medium', sans-serif";
+    const monoFont = "15px 'Cousine', monospace";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+
+    ctx.font = instrFont;
+    const wInstr = templatedWidth(ins.tmpl, ins.id);
+    let wThen = thenTmpl ? gap + ctx.measureText(thenLabel + " ").width + templatedWidth(thenTmpl, g.thenTarget || "") : 0;
+    ctx.font = monoFont;
+    let wOn = onLabel ? ctx.measureText(onLabel + " " + g.onLeg).width + gap : 0;
+    let wDist = distStr ? gap + ctx.measureText(distStr).width : 0;
+    const wGlyph = glyphBox + gap;
+
+    const leftLimit = 12 + 216 + 14;
+    const rightLimit = w - 112 - 14;
+    const availW = rightLimit - leftLimit;
+
+    let contentW = wOn + wGlyph + wInstr + wDist + wThen;
+    if (contentW > availW - 2 * pad && wThen) { thenLabel = ""; wThen = 0; contentW = wOn + wGlyph + wInstr + wDist; }
+    if (contentW > availW - 2 * pad && wOn) { onLabel = ""; wOn = 0; contentW = wGlyph + wInstr + wDist; }
+
+    const boxW = contentW + 2 * pad;
+    const boxH = 30;
+    let x0 = w / 2 - boxW / 2;
+    if (availW > boxW) x0 = Math.max(leftLimit, Math.min(x0, rightLimit - boxW));
+    const y0 = 12, midY = y0 + boxH / 2;
+
+    ctx.save();
+
+    roundRect(x0, y0, boxW, boxH, 6);
+    ctx.fillStyle = "rgba(19,22,30,0.93)";
+    ctx.fill();
+    ctx.strokeStyle = ins.base;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    const frac = Math.max(0, Math.min(1, g.routeProgressFrac || 0));
+    ctx.strokeStyle = ins.base;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x0 + 1, y0 + boxH - 1);
+    ctx.lineTo(x0 + 1 + (boxW - 2) * frac, y0 + boxH - 1);
+    ctx.stroke();
+
+    let x = x0 + pad;
+    if (onLabel) {
+        ctx.font = monoFont;
+        ctx.fillStyle = LABEL_COL;
+        ctx.fillText(onLabel + " ", x, midY);
+        x += ctx.measureText(onLabel + " ").width;
+        ctx.fillStyle = TWY_YELLOW;
+        ctx.fillText(g.onLeg, x, midY);
+        x += ctx.measureText(g.onLeg).width + gap;
+    }
+    drawGuidanceGlyph(x + glyphBox / 2, midY, glyphBox, ins.glyph, ins.base);
+    x += glyphBox + gap;
+    ctx.font = instrFont;
+    x += drawTemplated(x, midY, ins.tmpl, ins.id, ins.base, ins.idCol);
+    if (distStr) {
+        x += gap;
+        ctx.font = monoFont;
+        ctx.fillStyle = "#eef2ff";
+        ctx.fillText(distStr, x, midY);
+        x += ctx.measureText(distStr).width;
+    }
+    if (thenLabel) {
+        x += gap;
+        ctx.font = instrFont;
+        ctx.fillStyle = LABEL_COL;
+        ctx.fillText(thenLabel + " ", x, midY);
+        x += ctx.measureText(thenLabel + " ").width;
+        drawTemplated(x, midY, thenTmpl, g.thenTarget || "", LABEL_COL, TWY_YELLOW);
+    }
+    ctx.restore();
+}
+
+// The HUD is a native-only overlay drawn over the X-Plane sim (see
+// src/ui/GuidanceRender.cpp / Window.cpp) - the web frontend never renders it,
+// only the in-map ribbon. Its settings still sync via /api/settings so a
+// browser on a tablet can configure the sim HUD.
+function drawGuidance(w, h) {
+    if (!mapData || !mapData.guidance || !mapData.guidance.valid) return;
+    if (guidancePrefs().ribbon) drawGuidanceRibbon(w, h, guidancePrefs());
+}
+
 function drawPositionOverlay() {
     const ac = liveAircraft || (mapData ? mapData.aircraft : null);
     if (!ac) return;
@@ -997,6 +1662,7 @@ function updateHeader() {
 }
 
 let lastToScreen = null;
+let lastClusterProject = null;
 let lastEffectiveScale = 1;
 
 // ---- Interaction: pan/zoom/click, mouse + touch --------------------------
@@ -1014,7 +1680,7 @@ let pinchStartZoom = 1;
 const RIGHT_DRAG_ROTATE_DEG_PER_PX = 0.4;
 
 function canvasRelativePos(clientX, clientY) {
-    const rect = canvas.getBoundingClientRect();
+    const rect = canvasRect();
     // rect is the on-screen box (after any CSS `zoom` from "Interface
     // scale"); the pointer event is in the same screen space, but the
     // drawing / hit-test space is the pre-zoom logical size. Scale the
@@ -1032,6 +1698,10 @@ canvas.addEventListener("contextmenu", (ev) => ev.preventDefault());
 
 canvas.addEventListener("pointerdown", (ev) => {
     canvas.setPointerCapture(ev.pointerId);
+    // Refresh the cached canvas rect at the start of a gesture; pointermove
+    // then reuses it instead of forcing a layout read per event.
+    canvasRectCache = null;
+    requestRender();
     pointers.set(ev.pointerId, canvasRelativePos(ev.clientX, ev.clientY));
     if (pointers.size === 1) {
         dragButton = ev.button;
@@ -1046,6 +1716,7 @@ canvas.addEventListener("pointerdown", (ev) => {
 
 canvas.addEventListener("pointermove", (ev) => {
     if (!pointers.has(ev.pointerId)) return;
+    requestRender();
     const prev = pointers.get(ev.pointerId);
     const cur = canvasRelativePos(ev.clientX, ev.clientY);
     pointers.set(ev.pointerId, cur);
@@ -1082,6 +1753,7 @@ canvas.addEventListener("pointermove", (ev) => {
 
 function endPointer(ev) {
     if (!pointers.has(ev.pointerId)) return;
+    requestRender();
     const wasSingle = pointers.size === 1;
     pointers.delete(ev.pointerId);
     if (pointers.size < 2) pinchStartDist = null;
@@ -1089,8 +1761,8 @@ function endPointer(ev) {
     if (wasSingle && dragStart) {
         const pos = canvasRelativePos(ev.clientX, ev.clientY);
         const moved = Math.hypot(pos.x - dragStart.x, pos.y - dragStart.y);
-        // A right-button release is a rotate gesture, not a route-edge
-        // click, even if it happened to move less than the drag threshold.
+        // A right-button release is a rotate gesture, not a route-edge click,
+        // even if it moved less than the drag threshold.
         if (moved < CLICK_DRAG_THRESHOLD_PX && dragButton !== 2) {
             handleMapClick(pos, dragStart.pointerType);
         }
@@ -1104,10 +1776,70 @@ canvas.addEventListener("wheel", (ev) => {
     ev.preventDefault();
     zoom *= Math.pow(1.1, -ev.deltaY / 100);
     clampZoom();
+    requestRender();
 }, { passive: false });
 
+// Nearest solo-rendered (one-per-cluster-cell) parking stand to a click
+// position, or -1. Shared by the SayIntentions assign-gate hit-test and the
+// manual select/deselect hit-test in handleMapClick - identical clustering
+// rule as the parking-drawing block's own grouping; mirrors PanelMap.cpp's
+// FindSoloParkingHit.
+function findSoloParkingHit(pos, pointerType) {
+    if (!mapData || !Array.isArray(mapData.parking) || !lastClusterProject || !lastToScreen) return -1;
+    const cellCount = new Map();
+    const cellKey = (p) => {
+        const cp = lastClusterProject(p.x, p.y);
+        return Math.floor(cp.x / PARKING_CLUSTER_GRID_PX) + "," + Math.floor(cp.y / PARKING_CLUSTER_GRID_PX);
+    };
+    for (const p of mapData.parking) { const k = cellKey(p); cellCount.set(k, (cellCount.get(k) || 0) + 1); }
+
+    const hitRadius = pointerType === "touch" ? PARKING_HIT_RADIUS_TOUCH_PX : PARKING_HIT_RADIUS_PX;
+    let bestIndex = -1, bestScore = hitRadius;
+    ctx.font = "11px 'Roboto Medium', sans-serif";
+    for (let i = 0; i < mapData.parking.length; ++i) {
+        const p = mapData.parking[i];
+        if (!p.label || cellCount.get(cellKey(p)) !== 1) continue;
+        const c = lastToScreen(p.x, p.y);
+        let score = Math.hypot(pos.x - c.x, pos.y - c.y);
+        // Label box - matches the fillText in render() (offset +7,-7,
+        // left-aligned, alphabetic baseline), with slack.
+        const tw = ctx.measureText(p.label).width;
+        const lx = c.x + 7, ly = c.y - 7;
+        if (pos.x >= lx - 2 && pos.x <= lx + tw + 2 && pos.y >= ly - 12 && pos.y <= ly + 4) {
+            score = 0;
+        }
+        if (score < bestScore) { bestScore = score; bestIndex = i; }
+    }
+    return bestIndex;
+}
+
 function handleMapClick(pos, pointerType) {
-    if (!mapData || !mapData.hasTaxiRouteNetwork || !taxiEdges || !lastToScreen) return;
+    if (!mapData || !lastToScreen) return;
+
+    // SayIntentions gate assignment: a click on a labelled parking stand
+    // (feature enabled) is a request to assign that gate, and is consumed
+    // here before any taxi-route pick. The dot AND its label text are both
+    // click targets, and only stands that render solo (one per cluster grid
+    // cell) count - mirrors PanelMap.cpp.
+    if (mapData.siGate && mapData.siGate.enabled && Array.isArray(mapData.parking) && lastClusterProject) {
+        const idx = findSoloParkingHit(pos, pointerType);
+        if (idx >= 0) {
+            onGateClicked(mapData.parking[idx].label);
+            return;
+        }
+    } else if (mapData.siGate && !mapData.siGate.enabled && Array.isArray(mapData.parking) && lastClusterProject) {
+        // MANUAL gate selection (SayIntentions inactive): the exact same
+        // solo-stand hit-test as the SI branch above, but no confirmation -
+        // straight to the toggle endpoint (select/deselect decided server-
+        // side, see Window.cpp's ToggleManualGateSelect).
+        const idx = findSoloParkingHit(pos, pointerType);
+        if (idx >= 0) {
+            onGateSelected(idx);
+            return;
+        }
+    }
+
+    if (!mapData.hasTaxiRouteNetwork || !taxiEdges) return;
     const radius = pointerType === "touch" ? EDGE_HIT_RADIUS_TOUCH_PX : EDGE_HIT_RADIUS_PX;
     let bestIdx = -1, bestDist = radius;
     for (const e of taxiEdges) {
@@ -1125,21 +1857,41 @@ function handleMapClick(pos, pointerType) {
 
 // ---- Public API ------------------------------------------------------
 
-export function initMapPanel({ onEdgeClicked: edgeCb, onClearRoute: clearCb }) {
+export function initMapPanel({ onEdgeClicked: edgeCb, onClearRoute: clearCb, onGateClicked: gateCb, onGateSelected: gateSelectCb }) {
     onEdgeClicked = edgeCb;
     onClearRoute = clearCb;
+    onGateClicked = gateCb || (() => {});
+    onGateSelected = gateSelectCb || (() => {});
 
-    document.getElementById("zoom-out-btn").addEventListener("click", () => { zoom /= ZOOM_BUTTON_FACTOR; clampZoom(); });
-    document.getElementById("zoom-reset-btn").addEventListener("click", () => { zoom = 1; panOffset = { x: 0, y: 0 }; rotationDeg = 0; });
-    document.getElementById("zoom-in-btn").addEventListener("click", () => { zoom *= ZOOM_BUTTON_FACTOR; clampZoom(); });
+    document.getElementById("zoom-out-btn").addEventListener("click", () => { zoom /= ZOOM_BUTTON_FACTOR; clampZoom(); requestRender(); });
+    document.getElementById("zoom-reset-btn").addEventListener("click", () => { zoom = 1; panOffset = { x: 0, y: 0 }; rotationDeg = 0; requestRender(); });
+    document.getElementById("zoom-in-btn").addEventListener("click", () => { zoom *= ZOOM_BUTTON_FACTOR; clampZoom(); requestRender(); });
     document.getElementById("clear-route-btn").addEventListener("click", () => onClearRoute());
     trackNorthBtn.addEventListener("click", () => setTrackMode("north"));
     trackHeadingBtn.addEventListener("click", () => setTrackMode("heading"));
 
-    new ResizeObserver(() => render()).observe(wrap);
+    // Only invalidate the cached layout metrics - the rAF loop below renders
+    // every frame anyway and will pick the new size up. Calling render()
+    // straight from the observer forced an extra synchronous full render
+    // (and layout read) per resize notification.
+    new ResizeObserver(() => { invalidateLayout(); requestRender(); }).observe(wrap);
+    window.addEventListener("resize", () => { invalidateLayout(); requestRender(); });
+    window.addEventListener("scroll", () => { invalidateLayout(); requestRender(); }, { passive: true, capture: true });
+    // Interface-scale (CSS `zoom`) changes - dispatched by js/uiscale.js.
+    window.addEventListener("sgm-uiscale-changed", () => { invalidateLayout(); requestRender(); });
+    // Accent colour change (--accent) - dispatched by js/settings.js.
+    window.addEventListener("sgm-cssvars-changed", () => { refreshCssCache(); requestRender(); });
+    // Language change - the map draws translated guidance / status strings.
+    window.addEventListener("sgm-langchange", requestRender);
+    refreshCssCache();
 
     function loop() {
-        render();
+        if (renderRequested || isAnimating() ||
+            lastRenderTimeMs == null ||
+            (performance.now() - lastRenderTimeMs) >= IDLE_HEARTBEAT_MS) {
+            renderRequested = false;
+            render();
+        }
         requestAnimationFrame(loop);
     }
     requestAnimationFrame(loop);
@@ -1152,7 +1904,9 @@ export function setActiveIcao(newIcao) {
         taxiEdges = null;
         routeSelection = { edgeIndices: [], nodeSequence: [], edges: [], nextRequiredNodeIndex: 1 };
         atisForActiveAirport = null;
+        runwayUsageForActiveAirport = null;
         placeholder.textContent = t("map.loadingAirportData");
+        requestRender();
     }
 }
 
@@ -1162,12 +1916,18 @@ export function setActiveIcao(newIcao) {
 // drawRunwayUsageIndicator).
 export function setAtisForActiveAirport(atis) {
     atisForActiveAirport = atis || null;
+    runwayUsageForActiveAirport =
+        (atisForActiveAirport && atisForActiveAirport.success && atisForActiveAirport.available)
+            ? buildRunwayUsage(atisForActiveAirport)
+            : null;
+    requestRender();
 }
 
 // Text shown in place of the canvas while mapData is null (loading/error/no
 // selection yet) - see app.js's polling loop.
 export function setMapLoadStatus(text) {
     placeholder.textContent = text;
+    requestRender();
 }
 
 export function getActiveIcao() {
@@ -1176,20 +1936,25 @@ export function getActiveIcao() {
 
 export function setMapData(data) {
     mapData = data;
+    signWidthCache.clear();
     if (!data.hasTaxiRouteNetwork) {
         taxiEdges = null;
     }
+    requestRender();
 }
 
 export function setTaxiNetwork(data) {
     taxiEdges = data.available ? data.edges : null;
+    requestRender();
 }
 
 export function setRouteSelection(sel) {
     routeSelection = sel;
+    requestRender();
 }
 
 export function setLiveAircraft(ac) {
     liveAircraft = ac;
     projectedAircraft = projectLatLon(ac.lat, ac.lon);
+    requestRender();
 }

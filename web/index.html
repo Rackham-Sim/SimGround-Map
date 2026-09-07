@@ -129,6 +129,20 @@
             <input id="show-traffic" type="checkbox">
         </div>
 
+        <h3 style="margin-top:14px" data-i18n="settings.taxiGuidance">Taxi guidance</h3>
+        <hr>
+        <div class="setting-row">
+            <label data-i18n="settings.showTaxiGuidance">Show taxi guidance</label>
+            <input id="taxi-guidance" type="checkbox">
+        </div>
+        <div class="setting-row" id="guidance-units-row">
+            <label data-i18n="settings.distanceUnits">Distance units</label>
+            <select id="guidance-units">
+                <option value="0" data-i18n="settings.unitsMeters">Meters</option>
+                <option value="1" data-i18n="settings.unitsFeet">Feet</option>
+            </select>
+        </div>
+
         <h3 style="margin-top:14px" data-i18n="settings.simbrief">SimBrief</h3>
         <hr>
         <div class="setting-row">
@@ -149,6 +163,14 @@
         <div class="setting-row" id="sayintentions-row">
             <label data-i18n="settings.apiKey">API key</label>
             <input id="sayintentions-key" type="password">
+        </div>
+        <div class="setting-row" id="sayintentions-gate-row">
+            <label data-i18n="settings.showSiGate">Show my SayIntentions gate</label>
+            <input id="sayintentions-gate" type="checkbox">
+        </div>
+        <div class="setting-row" id="sayintentions-taxi-row">
+            <label data-i18n="settings.showSiTaxiRoute">Show SayIntentions taxi route</label>
+            <input id="sayintentions-taxi" type="checkbox">
         </div>
 
         <h3 style="margin-top:14px" data-i18n="settings.webInterface">Web Interface</h3>
