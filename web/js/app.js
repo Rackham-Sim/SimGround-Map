@@ -98,7 +98,17 @@ function selectIcao(icao) {
     localSelectionPendingSince = Date.now();
 }
 
-initAirportsPanel({ onSelectIcao: selectIcao });
+// Custom scenery <-> global apt.dat source toggle (see WebServer.cpp's
+// /toggle-source route). A POST only enqueues the flip; the plugin applies
+// it (and reloads the map if this ICAO is the active one) on its next
+// frame - re-poll a little sooner than the slow tick so the button's own
+// label and a reloaded map both feel immediate, same as onGateClicked below.
+async function toggleAirportSource(icao) {
+    await api.toggleAirportSource(icao);
+    setTimeout(pollAll, 400);
+}
+
+initAirportsPanel({ onSelectIcao: selectIcao, onToggleSource: toggleAirportSource });
 // Re-fetches the route selection right after a click/clear POST resolves,
 // instead of waiting for the next pollMap() tick (up to POLL_MS away) -
 // the native panel reflects a click the same frame, so leaving the web one
@@ -379,7 +389,7 @@ async function init() {
     const res = await api.getSettings();
     if (res.ok) {
         atisNetwork = res.body.atisNetwork;
-        settingsPanel.populate(res.body); // also applies accent/opacity, see settings.js
+        settingsPanel.populate(res.body); // also applies the accent color, see settings.js
         if (res.body.version) {
             document.getElementById("app-version").textContent = "v" + res.body.version;
             checkForUpdate(res.body.version);

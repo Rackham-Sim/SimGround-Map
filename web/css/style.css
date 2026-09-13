@@ -438,10 +438,25 @@ input:focus, select:focus, button:focus {
     font-size: 12px;
 }
 
+/* Row for the source-toggle/delete buttons, in normal document flow right
+   after the runway chips (or the header, if there are none) instead of
+   position:absolute pinned to the card's bottom-right corner - see
+   airports.js's makeCard comment and PanelAirports.cpp's kButtonRowTopOffset
+   for the native equivalent (real-usage feedback: the corner placement left
+   these looking stranded well below the runway chips instead of belonging
+   with them). */
+.card-actions-row {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+}
+
 .delete-btn {
-    position: absolute;
-    right: 6px;
-    bottom: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     width: 22px;
     height: 20px;
     padding: 0;
@@ -453,6 +468,37 @@ input:focus, select:focus, button:focus {
 .delete-btn:hover {
     background: var(--red);
     color: var(--text-bright);
+}
+
+/* Custom scenery <-> global apt.dat source toggle. Dim/neutral when using
+   custom scenery (the default - nothing to draw attention to); amber
+   (matching the MANUAL badge) when overridden to global, since that's a
+   deliberate departure worth noticing. */
+.source-toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 20px;
+    padding: 0 8px;
+    line-height: 1;
+    font-size: 11px;
+    font-weight: 700;
+    background: color-mix(in srgb, var(--text-dim) 20%, transparent);
+    border-color: var(--text-dim);
+    color: var(--text-dim);
+}
+.source-toggle-btn:hover {
+    background: var(--text-dim);
+    color: var(--panel2);
+}
+.source-toggle-btn.active {
+    background: color-mix(in srgb, var(--amber) 20%, transparent);
+    border-color: var(--amber);
+    color: var(--amber);
+}
+.source-toggle-btn.active:hover {
+    background: var(--amber);
+    color: var(--panel2);
 }
 
 #add-airport-btn, #clear-list-btn {
@@ -668,32 +714,9 @@ input:focus, select:focus, button:focus {
     min-width: 0;
 }
 
-.setting-row input[type="range"] {
-    flex: 1 1 auto;
-}
-
 .setting-row input[type="checkbox"] {
     width: 18px;
     height: 18px;
-}
-
-#detected-ips {
-    font-family: "Cousine", monospace;
-    font-size: 12px;
-    background: var(--panel3);
-    border: 1px solid var(--border2);
-    border-radius: var(--frame-radius);
-    padding: 8px;
-    margin-top: 6px;
-}
-
-#detected-ips a {
-    color: var(--cyan);
-    display: block;
-}
-
-#detected-ips .warn {
-    color: var(--amber);
 }
 
 /* ---- Footer -------------------------------------------------------------- */

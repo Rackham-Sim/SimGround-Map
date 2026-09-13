@@ -1,24 +1,26 @@
-// Settings popover - accent/opacity, SimBrief user ID, ATIS network/key,
-// web interface enable/port. Mirrors Window.cpp's DrawSettingsButton popover
-// field-for-field (theme::kAccentPalette for swatches, the same
-// VATSIM/IVAO/SayIntentions AI network list). See NOTES.md (section 27)
-// for why this panel shows "connected via <host>" instead of the native
-// panel's detected-local-IP list (that feature exists so someone standing at
-// the X-Plane PC can find a URL to open elsewhere - a browser already on
-// this page has no use for it, it's already using a working URL).
+// Settings popover - accent, SimBrief user ID, ATIS network/key. Mirrors
+// Window.cpp's DrawSettingsButton popover field-for-field (theme::
+// kAccentPalette for swatches, the same VATSIM/IVAO/SayIntentions AI network
+// list) MINUS the fields that make no sense from inside a browser tab (#SG04):
+// opacity (nothing behind a browser tab to reveal), and the web-interface
+// enable/port controls themselves (changing the port of the very server
+// serving this page from this page risks cutting your own connection, and
+// disabling it would too - both stay native-only, set from the X-Plane PC).
 import { api } from "./api.js";
-import { LANGUAGES, getLang, setLang, t } from "./i18n.js";
+import { LANGUAGES, getLang, setLang } from "./i18n.js";
 import { getUiScale, setUiScale, UI_SCALE_PRESETS } from "./uiscale.js";
 
 // theme::kAccentPalette, src/ui/Theme.h - kept in the same order so swatch
-// position matches the native popover.
+// position matches the native popover. White is deliberately absent (see
+// Theme.h's kWhite comment: it reads as a plain highlight/selection color on
+// the ground map, not a usable accent) - was still offered here (#SG05)
+// after being removed natively.
 const ACCENT_SWATCHES = [
     { name: "Cyan", hex: "#00e5ff" },
     { name: "Amber", hex: "#ffb300" },
     { name: "Green", hex: "#00e676" },
     { name: "Orange", hex: "#ff6d00" },
     { name: "Violet", hex: "#d500f9" },
-    { name: "White", hex: "#ffffff" },
 ];
 
 function hexToRgbFloat(hex) {
@@ -31,15 +33,15 @@ function rgbFloatToHex(r, g, b) {
     return `#${c(r)}${c(g)}${c(b)}`;
 }
 
-// Sets the two CSS custom properties every panel/card/modal background reads
-// (rgba(var(--panel-rgb), var(--opacity)) in style.css) - mirrors
-// Theme::Apply's WindowBg/ChildBg alpha without making the whole page
-// transparent (a browser tab has no desktop behind it to reveal, unlike the
-// in-sim overlay window this setting was designed for).
-export function applyAccentAndOpacity(settings) {
+// Sets the --accent CSS custom property every panel/card/modal reads.
+// Opacity is deliberately NOT ported here (#SG04) - style.css's --opacity
+// default (1, fully opaque) is left untouched, so panel/card backgrounds
+// stay solid regardless of the native panel's own opacity setting: a
+// browser tab has no desktop behind it to reveal, unlike the in-sim overlay
+// window that setting was designed for.
+export function applyAccent(settings) {
     const hex = rgbFloatToHex(settings.accentR, settings.accentG, settings.accentB);
     document.documentElement.style.setProperty("--accent", hex);
-    document.documentElement.style.setProperty("--opacity", settings.opacity);
     // Let the map canvas refresh its cached CSS custom properties instead of
     // re-reading them via getComputedStyle() every render frame.
     window.dispatchEvent(new CustomEvent("sgm-cssvars-changed"));
@@ -57,8 +59,15 @@ export function initSettingsPanel({ onSettingsChanged }) {
         btn.title = swatch.name;
         btn.addEventListener("click", async () => {
             const rgb = hexToRgbFloat(swatch.hex);
-            await api.postSettings({ accentR: rgb.r, accentG: rgb.g, accentB: rgb.b });
+            // Apply locally right away (#SG08 - previously only took effect
+            // after closing and reopening the settings popover, since
+            // applyAccent was only ever called from populate() on open).
+            // The native panel doesn't need this: it re-applies its own
+            // theme from gSettings every frame, so a change is visible
+            // instantly there without an explicit call.
+            applyAccent({ accentR: rgb.r, accentG: rgb.g, accentB: rgb.b });
             highlightSwatch(swatch.hex);
+            await api.postSettings({ accentR: rgb.r, accentG: rgb.g, accentB: rgb.b });
         });
         swatchRow.appendChild(btn);
     }
@@ -98,16 +107,6 @@ export function initSettingsPanel({ onSettingsChanged }) {
     });
     guidanceUnits.addEventListener("change", () => {
         api.postSettings({ taxiGuidanceUnitsFeet: Number(guidanceUnits.value) });
-    });
-
-    const opacitySlider = document.getElementById("opacity-slider");
-    const opacityVal = document.getElementById("opacity-val");
-    opacitySlider.addEventListener("input", () => {
-        opacityVal.textContent = Number(opacitySlider.value).toFixed(2);
-        document.documentElement.style.setProperty("--opacity", opacitySlider.value);
-    });
-    opacitySlider.addEventListener("change", () => {
-        api.postSettings({ opacity: Number(opacitySlider.value) });
     });
 
     // Per-browser, not sent to /api/settings - see js/uiscale.js. Fixed
@@ -168,27 +167,6 @@ export function initSettingsPanel({ onSettingsChanged }) {
         api.postSettings({ showSayIntentionsTaxiRoute: siTaxiInput.checked });
     });
 
-    const webEnabled = document.getElementById("web-enabled");
-    webEnabled.addEventListener("change", () => {
-        api.postSettings({ webInterfaceEnabled: webEnabled.checked });
-    });
-
-    const webPort = document.getElementById("web-port");
-    webPort.addEventListener("change", () => {
-        const port = Number(webPort.value);
-        if (port >= 1 && port <= 65535) {
-            api.postSettings({ webInterfacePort: port });
-        }
-    });
-
-    function renderDetectedIps() {
-        document.getElementById("detected-ips").innerHTML =
-            t("settings.connectedVia", { host: "" }).replace(/\s*$/, "") +
-            ` <span class="mono">${location.protocol}//${location.host}</span>`;
-    }
-    renderDetectedIps();
-    window.addEventListener("sgm-langchange", renderDetectedIps);
-
     document.getElementById("gear-btn").addEventListener("click", async () => {
         const res = await api.getSettings();
         if (res.ok) {
@@ -205,8 +183,6 @@ export function initSettingsPanel({ onSettingsChanged }) {
 
     function populate(settings) {
         current = settings;
-        opacitySlider.value = settings.opacity;
-        opacityVal.textContent = Number(settings.opacity).toFixed(2);
         highlightScale();
         highlightSwatch(rgbFloatToHex(settings.accentR, settings.accentG, settings.accentB));
         userIdInput.value = settings.simbriefUserId || "";
@@ -219,9 +195,7 @@ export function initSettingsPanel({ onSettingsChanged }) {
         guidanceToggle.checked = settings.showTaxiGuidance !== false;
         guidanceUnits.value = String(settings.taxiGuidanceUnitsFeet || 0);
         setGuidanceRows();
-        webEnabled.checked = !!settings.webInterfaceEnabled;
-        webPort.value = settings.webInterfacePort;
-        applyAccentAndOpacity(settings);
+        applyAccent(settings);
         onSettingsChanged(settings);
     }
 

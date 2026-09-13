@@ -111,11 +111,6 @@
         <h3 data-i18n="settings.display">Display</h3>
         <hr>
         <div class="setting-row">
-            <label data-i18n="settings.opacity">Opacity</label>
-            <input id="opacity-slider" type="range" min="0.3" max="1" step="0.01">
-            <span id="opacity-val" class="mono dim"></span>
-        </div>
-        <div class="setting-row">
             <label data-i18n="settings.interfaceScale">Interface scale</label>
             <div id="ui-scale-buttons" class="scale-btns"></div>
         </div>
@@ -172,18 +167,6 @@
             <label data-i18n="settings.showSiTaxiRoute">Show SayIntentions taxi route</label>
             <input id="sayintentions-taxi" type="checkbox">
         </div>
-
-        <h3 style="margin-top:14px" data-i18n="settings.webInterface">Web Interface</h3>
-        <hr>
-        <div class="setting-row">
-            <label data-i18n="settings.enabled">Enabled</label>
-            <input id="web-enabled" type="checkbox">
-        </div>
-        <div class="setting-row">
-            <label data-i18n="settings.port">Port</label>
-            <input id="web-port" type="number" min="1" max="65535">
-        </div>
-        <div id="detected-ips"></div>
 
         <div class="actions">
             <button id="settings-close" class="accent-border" data-i18n="settings.close">Close</button>

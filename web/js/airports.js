@@ -6,6 +6,7 @@ import { atisBadgeState, renderAtisPopup, renderRunwayChips } from "./atis.js";
 import { getLang, t } from "./i18n.js";
 
 let onSelectIcao = () => {};
+let onToggleSource = () => {};
 
 function makeEmptyCard() {
     const card = document.createElement("div");
@@ -69,15 +70,48 @@ function makeCard(entry, { selected, atis, networkIndex, deletable, onDelete, ga
 
     card.addEventListener("click", () => onSelectIcao(entry.icao));
 
-    if (deletable) {
-        const del = document.createElement("button");
-        del.className = "delete-btn";
-        del.textContent = "x";
-        del.addEventListener("click", (ev) => {
-            ev.stopPropagation();
-            onDelete(entry.icao);
-        });
-        card.appendChild(del);
+    // Custom scenery <-> global apt.dat source toggle - only shown when this
+    // ICAO genuinely exists in both (see WebServer.cpp's AirportEntryToJson).
+    // CUSTOM/GLOBAL are left untranslated in every language, same as the
+    // native panel (see Translations.h's SourceCustom/SourceGlobal comment)
+    // - they're X-Plane's own folder names ("Custom Scenery"/"Global
+    // Airports"), not ordinary UI text.
+    //
+    // Both buttons sit in a normal-flow row right after the runway chips
+    // (or the header, if there aren't any) instead of being position:
+    // absolute and pinned to the card's bottom-right corner - real-usage
+    // feedback that pinning them to the corner left them looking stranded
+    // below the runway chips instead of belonging with them, once the
+    // native panel's equivalent fix (PanelAirports.cpp's kButtonRowTopOffset)
+    // showed what "next to the ARR chips" should actually look like.
+    if (entry.sourceChoice || deletable) {
+        const actions = document.createElement("div");
+        actions.className = "card-actions-row";
+
+        if (entry.sourceChoice) {
+            const src = document.createElement("button");
+            src.className = "source-toggle-btn" + (entry.usingGlobal ? " active" : "");
+            src.textContent = entry.usingGlobal ? "GLOBAL" : "CUSTOM";
+            src.title = t("panel.sourceToggleTooltip", { source: entry.usingGlobal ? "CUSTOM" : "GLOBAL" });
+            src.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                onToggleSource(entry.icao);
+            });
+            actions.appendChild(src);
+        }
+
+        if (deletable) {
+            const del = document.createElement("button");
+            del.className = "delete-btn";
+            del.textContent = "x";
+            del.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                onDelete(entry.icao);
+            });
+            actions.appendChild(del);
+        }
+
+        card.appendChild(actions);
     }
 
     return card;
@@ -92,8 +126,9 @@ function openAtisPopup(icao, atis, networkIndex) {
     document.getElementById("atis-modal").classList.remove("hidden");
 }
 
-export function initAirportsPanel({ onSelectIcao: selectCb }) {
+export function initAirportsPanel({ onSelectIcao: selectCb, onToggleSource: toggleSourceCb }) {
     onSelectIcao = selectCb;
+    onToggleSource = toggleSourceCb;
 
     document.getElementById("refresh-btn").addEventListener("click", async (ev) => {
         ev.target.disabled = true;

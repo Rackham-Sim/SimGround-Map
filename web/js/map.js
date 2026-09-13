@@ -1774,8 +1774,21 @@ canvas.addEventListener("pointercancel", endPointer);
 
 canvas.addEventListener("wheel", (ev) => {
     ev.preventDefault();
+    // Zoom-to-cursor (see PanelMap.cpp's own wheel handler, ported here -
+    // #SG06 real-usage request: zooming used to always anchor on the
+    // airport/canvas center, so zooming in on a spot near the canvas edge
+    // required an extra pan to bring it back into view). Solving toScreen()'s
+    // own transform for the pan offset that keeps the point currently under
+    // the cursor fixed on screen across the zoom change: with k =
+    // newZoom/oldZoom, panOffset' = (mouse - center) * (1 - k) + k * panOffset.
+    const oldZoom = zoom;
     zoom *= Math.pow(1.1, -ev.deltaY / 100);
     clampZoom();
+    const k = zoom / oldZoom;
+    const mouse = canvasRelativePos(ev.clientX, ev.clientY);
+    const centerX = sizeCache.w / 2, centerY = sizeCache.h / 2;
+    panOffset.x = (mouse.x - centerX) * (1 - k) + k * panOffset.x;
+    panOffset.y = (mouse.y - centerY) * (1 - k) + k * panOffset.y;
     requestRender();
 }, { passive: false });
 

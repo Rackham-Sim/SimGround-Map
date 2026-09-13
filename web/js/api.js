@@ -26,6 +26,7 @@ export const api = {
     addManualAirport: (icao) => req("POST", "/api/airports/manual", { icao }),
     deleteManualAirport: (icao) => req("DELETE", `/api/airports/manual/${icao}`),
     clearAirports: () => req("POST", "/api/airports/clear"),
+    toggleAirportSource: (icao) => req("POST", `/api/airport/${icao}/toggle-source`),
 
     getAirportMap: (icao) => req("GET", `/api/airport/${icao}/map`),
     getTaxiNetwork: (icao) => req("GET", `/api/airport/${icao}/taxi-network`),
