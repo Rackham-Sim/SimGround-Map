@@ -15,6 +15,6 @@ GPS reprojection, deviations from the native UI, test results).
 - `js/airports.js`, `js/map.js`, `js/atis.js`, `js/settings.js`, `js/gps.js`
   - one module per panel/concern
 - `js/app.js` - bootstrap + polling loops, wires the modules together
-- `fonts/` - Roboto Medium + Cousine Regular, copied from the already-
-  vendored `third_party/imgui/misc/fonts/` (same Apache-2.0 files the
-  native UI embeds, reused here for visual consistency)
+- `fonts/` - Inter (Regular + SemiBold) + JetBrains Mono, copied from `third_party/fonts/`
+  (same OFL-licensed Google Fonts files the native UI embeds, reused here
+  for visual consistency - #SG11)

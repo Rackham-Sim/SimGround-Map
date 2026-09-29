@@ -7,7 +7,7 @@
 // serving this page from this page risks cutting your own connection, and
 // disabling it would too - both stay native-only, set from the X-Plane PC).
 import { api } from "./api.js";
-import { LANGUAGES, getLang, setLang } from "./i18n.js";
+import { LANGUAGES, getLang, setLang, t } from "./i18n.js";
 import { getUiScale, setUiScale, UI_SCALE_PRESETS } from "./uiscale.js";
 
 // theme::kAccentPalette, src/ui/Theme.h - kept in the same order so swatch
@@ -33,6 +33,22 @@ function rgbFloatToHex(r, g, b) {
     return `#${c(r)}${c(g)}${c(b)}`;
 }
 
+// Text color for something drawn on a solid `hex` fill - mirrors
+// theme::TextOn (Theme.cpp): white (--text-bright) while it keeps WCAG
+// contrast >= 3:1 against the fill, anthracite otherwise. Real-usage
+// report: white on a selected green/cyan/amber segment read poorly.
+function relativeLuminance(hex) {
+    const lin = (v) => { const s = v / 255; return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
+    const n = parseInt(hex.slice(1), 16);
+    return 0.2126 * lin((n >> 16) & 255) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255);
+}
+export function textOn(hex) {
+    const TEXT_BRIGHT = "#eef2ff", TEXT_ON_LIGHT = "#12161c";
+    const lb = relativeLuminance(hex), lw = relativeLuminance(TEXT_BRIGHT);
+    const contrast = (Math.max(lb, lw) + 0.05) / (Math.min(lb, lw) + 0.05);
+    return contrast >= 3 ? TEXT_BRIGHT : TEXT_ON_LIGHT;
+}
+
 // Sets the --accent CSS custom property every panel/card/modal reads.
 // Opacity is deliberately NOT ported here (#SG04) - style.css's --opacity
 // default (1, fully opaque) is left untouched, so panel/card backgrounds
@@ -42,6 +58,7 @@ function rgbFloatToHex(r, g, b) {
 export function applyAccent(settings) {
     const hex = rgbFloatToHex(settings.accentR, settings.accentG, settings.accentB);
     document.documentElement.style.setProperty("--accent", hex);
+    document.documentElement.style.setProperty("--on-accent", textOn(hex));
     // Let the map canvas refresh its cached CSS custom properties instead of
     // re-reading them via getComputedStyle() every render frame.
     window.dispatchEvent(new CustomEvent("sgm-cssvars-changed"));
@@ -56,6 +73,7 @@ export function initSettingsPanel({ onSettingsChanged }) {
         const btn = document.createElement("button");
         btn.className = "swatch";
         btn.style.background = swatch.hex;
+        btn.style.setProperty("--check-color", textOn(swatch.hex));
         btn.title = swatch.name;
         btn.addEventListener("click", async () => {
             const rgb = hexToRgbFloat(swatch.hex);
@@ -153,6 +171,15 @@ export function initSettingsPanel({ onSettingsChanged }) {
     });
 
     const apiKeyInput = document.getElementById("sayintentions-key");
+    // Reveal/hide eye next to the key (mirrors Window.cpp's hand-drawn eye):
+    // slashed while masked. Local only, never persisted.
+    const apiKeyEye = document.getElementById("sayintentions-key-eye");
+    apiKeyEye.addEventListener("click", () => {
+        const reveal = apiKeyInput.type === "password";
+        apiKeyInput.type = reveal ? "text" : "password";
+        apiKeyEye.setAttribute("aria-pressed", String(reveal));
+        apiKeyEye.title = t(reveal ? "settings.hideApiKey" : "settings.showApiKey");
+    });
     apiKeyInput.addEventListener("change", () => {
         api.postSettings({ sayIntentionsApiKey: apiKeyInput.value });
     });

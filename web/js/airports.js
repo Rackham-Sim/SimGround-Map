@@ -8,6 +8,19 @@ import { getLang, t } from "./i18n.js";
 let onSelectIcao = () => {};
 let onToggleSource = () => {};
 
+// Small upright airplane silhouette - the same white PNG the map's own-ship
+// icon uses (assets/aircraft-icon.png), mirroring theme::DrawAircraftGlyph
+// in Theme.cpp.
+function makeAircraftIcon(sizePx) {
+    const img = document.createElement("img");
+    img.src = "assets/aircraft-icon.png";
+    img.width = sizePx;
+    img.height = sizePx;
+    img.alt = "";
+    img.className = "aircraft-glyph";
+    return img;
+}
+
 function makeEmptyCard() {
     const card = document.createElement("div");
     card.className = "airport-card empty";
@@ -19,18 +32,42 @@ function makeCard(entry, { selected, atis, networkIndex, deletable, onDelete, ga
     const card = document.createElement("div");
     card.className = "airport-card" + (selected ? " selected" : "");
 
+    // Two-line header (#SG11): ICAO on its own line, city name below it -
+    // replaces the old single side-by-side row (PanelAirports.cpp's
+    // DrawAirportCard mirrors this same layout change).
     const header = document.createElement("div");
     header.className = "header-row";
+    const headerLeft = document.createElement("div");
+    headerLeft.className = "header-left";
+    const icaoLine = document.createElement("div");
+    icaoLine.className = "icao-line";
     const icao = document.createElement("span");
     icao.className = "icao mono";
     icao.textContent = entry.icao;
-    const name = document.createElement("span");
+    icaoLine.appendChild(icao);
+    // Small aircraft-position marker (#SG11) - fixed white, never the accent
+    // (see map.js's drawAircraftIcon comment for why the aircraft stays a
+    // dedicated non-accent color everywhere it appears), shown on whichever
+    // card's real GPS position the aircraft is at right now (WebServer.cpp's
+    // "aircraftHere" field) - not necessarily the card whose diagram is
+    // currently selected.
+    if (entry.aircraftHere) {
+        icaoLine.appendChild(makeAircraftIcon(14));
+    }
+    const name = document.createElement("div");
     name.className = "name";
     name.textContent = entry.name || t("panel.namePending");
     if (!entry.name) name.classList.add("dim");
+    headerLeft.append(icaoLine, name);
+
     const badgeRow = document.createElement("div");
     badgeRow.className = "badge-row";
 
+    // Fixed-width ATIS/status columns (#SG11) - so the ATIS chip's own
+    // position never shifts depending on whether the status column shows
+    // "AUTO" or "MANUAL" (PanelAirports.cpp's kStatusColW/kAtisColGap).
+    const atisCol = document.createElement("div");
+    atisCol.className = "atis-col";
     const state = atisBadgeState(atis, networkIndex);
     const atisChip = document.createElement("span");
     atisChip.className = "atis-chip " + state.cls;
@@ -41,14 +78,18 @@ function makeCard(entry, { selected, atis, networkIndex, deletable, onDelete, ga
             openAtisPopup(entry.icao, atis, networkIndex);
         });
     }
-    badgeRow.appendChild(atisChip);
+    atisCol.appendChild(atisChip);
+    badgeRow.appendChild(atisCol);
 
+    const statusCol = document.createElement("div");
+    statusCol.className = "status-col";
     const statusBadge = document.createElement("span");
     statusBadge.className = "badge " + (entry.isAuto ? "auto" : "manual");
     statusBadge.textContent = entry.isAuto ? t("panel.auto") : t("panel.manual");
-    badgeRow.appendChild(statusBadge);
+    statusCol.appendChild(statusBadge);
+    badgeRow.appendChild(statusCol);
 
-    header.append(icao, name, badgeRow);
+    header.append(headerLeft, badgeRow);
     card.appendChild(header);
 
     if (atis && atis.success) {
@@ -88,22 +129,36 @@ function makeCard(entry, { selected, atis, networkIndex, deletable, onDelete, ga
         const actions = document.createElement("div");
         actions.className = "card-actions-row";
 
+        // Global/Custom 2-segment control (#SG11) - both options always
+        // visible, replacing the old single button whose label alternated
+        // between the current and the "other" source (PanelAirports.cpp's
+        // drawSegment mirrors this exactly, including reusing the same
+        // accent-tinted-when-active look as every other segmented control
+        // in this app rather than a special amber-for-override style).
         if (entry.sourceChoice) {
-            const src = document.createElement("button");
-            src.className = "source-toggle-btn" + (entry.usingGlobal ? " active" : "");
-            src.textContent = entry.usingGlobal ? "GLOBAL" : "CUSTOM";
-            src.title = t("panel.sourceToggleTooltip", { source: entry.usingGlobal ? "CUSTOM" : "GLOBAL" });
-            src.addEventListener("click", (ev) => {
-                ev.stopPropagation();
-                onToggleSource(entry.icao);
-            });
-            actions.appendChild(src);
+            const seg = document.createElement("div");
+            seg.className = "source-toggle-seg";
+            const makeSeg = (label, active) => {
+                const btn = document.createElement("button");
+                btn.className = "source-seg-btn" + (active ? " active" : "");
+                btn.textContent = label;
+                if (!active) {
+                    btn.title = t("panel.sourceToggleTooltip", { source: label });
+                    btn.addEventListener("click", (ev) => {
+                        ev.stopPropagation();
+                        onToggleSource(entry.icao);
+                    });
+                }
+                return btn;
+            };
+            seg.append(makeSeg("GLOBAL", !!entry.usingGlobal), makeSeg("CUSTOM", !entry.usingGlobal));
+            actions.appendChild(seg);
         }
 
         if (deletable) {
             const del = document.createElement("button");
             del.className = "delete-btn";
-            del.textContent = "x";
+            del.textContent = "×";
             del.addEventListener("click", (ev) => {
                 ev.stopPropagation();
                 onDelete(entry.icao);
@@ -130,14 +185,18 @@ export function initAirportsPanel({ onSelectIcao: selectCb, onToggleSource: togg
     onSelectIcao = selectCb;
     onToggleSource = toggleSourceCb;
 
-    document.getElementById("refresh-btn").addEventListener("click", async (ev) => {
-        ev.target.disabled = true;
+    document.getElementById("refresh-btn").addEventListener("click", async () => {
+        refreshInFlight = true;
+        updateRefreshButton();
         const res = await api.refreshSimbrief();
         if (!res.ok) {
             document.getElementById("fetch-error").textContent = res.body?.error || t("panel.refreshFailed");
         }
-        ev.target.disabled = false;
+        refreshInFlight = false;
+        updateRefreshButton();
     });
+    window.addEventListener("sgm-langchange", updateRefreshButton);
+    updateRefreshButton();
 
     document.getElementById("atis-modal").addEventListener("click", (ev) => {
         if (ev.target.id === "atis-modal") {
@@ -198,8 +257,27 @@ export function initAirportsPanel({ onSelectIcao: selectCb, onToggleSource: togg
 // the common case in cruise. JSON.stringify of a handful of small objects
 // is far cheaper than the DOM rebuild it guards.
 let lastPanelSig = null;
+// Refresh button label/tooltip - mirrors PanelAirports.cpp's DrawStatusRow:
+// "Reload SimBrief plan" with a SimBrief ID, "Use nearest airport" without
+// one (the #SG10 fallback the server runs), "Loading SimBrief..." while a
+// fetch is in flight.
+let lastHasSimbriefId = true;
+let lastFetchLoading = false; // server-side fetch in progress (could be started natively)
+let refreshInFlight = false;  // this tab's own POST in progress
+function updateRefreshButton() {
+    const btn = document.getElementById("refresh-btn");
+    const loading = refreshInFlight || lastFetchLoading;
+    document.getElementById("refresh-label").textContent =
+        t(loading ? "panel.refreshing" : lastHasSimbriefId ? "panel.refresh" : "panel.useNearestAirport");
+    btn.title = t(lastHasSimbriefId ? "panel.refreshTitleSimbrief" : "panel.refreshTitleNearest");
+    btn.disabled = loading;
+}
+
 export function renderAirportsPanel(flight, atisByIcao, networkIndex, selectedIcao) {
     document.getElementById("fetch-error").textContent = flight.fetchError || "";
+    if (typeof flight.hasSimbriefId === "boolean") lastHasSimbriefId = flight.hasSimbriefId;
+    lastFetchLoading = !!flight.fetchLoading;
+    updateRefreshButton();
 
     const planIcaos = icaosInPlan(flight);
     const atisSlice = {};

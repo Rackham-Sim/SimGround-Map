@@ -1,1 +1,3 @@
-
+web/assets/arrow-traffic-gray.png
+web/assets/arrow-user-aircraft-white.png
+web/fonts/SpaceGrotesk-Regular.ttf

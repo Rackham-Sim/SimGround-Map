@@ -57,6 +57,48 @@ collapseBtn.addEventListener("click", () => setListCollapsed(!mainEl.classList.c
 setListCollapsed(localStorage.getItem(LIST_COLLAPSED_KEY) === "1");
 window.addEventListener("sgm-langchange", () => setListCollapsed(listCollapsed));
 
+// Draggable divider between the airport list and the ground map - real-
+// usage request, see PanelAirports.cpp's splitter for the native equivalent.
+// Per-browser (localStorage), same reasoning as LIST_COLLAPSED_KEY above -
+// the width is a per-device layout preference, not shared via /api/settings.
+const PANEL_WIDTH_KEY = "sgm-panel-width";
+const MIN_AIRPORTS_PANEL_WIDTH = 220;
+const MIN_MAP_PANEL_WIDTH = 280;
+const airportsPanelEl = document.getElementById("airports-panel");
+const splitterEl = document.getElementById("panel-splitter");
+
+function applyPanelWidth(px) {
+    airportsPanelEl.style.flexBasis = px + "px";
+}
+const savedPanelWidth = parseFloat(localStorage.getItem(PANEL_WIDTH_KEY));
+if (!Number.isNaN(savedPanelWidth) && savedPanelWidth > 0) {
+    applyPanelWidth(savedPanelWidth);
+}
+
+let splitterDragging = false;
+splitterEl.addEventListener("mousedown", (ev) => {
+    splitterDragging = true;
+    splitterEl.classList.add("dragging");
+    ev.preventDefault(); // avoid text-selection drag artifacts while dragging
+});
+window.addEventListener("mousemove", (ev) => {
+    if (!splitterDragging) {
+        return;
+    }
+    const mainRect = mainEl.getBoundingClientRect();
+    const maxWidth = Math.max(MIN_AIRPORTS_PANEL_WIDTH, mainRect.width - MIN_MAP_PANEL_WIDTH);
+    const width = Math.min(Math.max(ev.clientX - mainRect.left, MIN_AIRPORTS_PANEL_WIDTH), maxWidth);
+    applyPanelWidth(width);
+});
+window.addEventListener("mouseup", () => {
+    if (!splitterDragging) {
+        return;
+    }
+    splitterDragging = false;
+    splitterEl.classList.remove("dragging");
+    localStorage.setItem(PANEL_WIDTH_KEY, parseFloat(airportsPanelEl.style.flexBasis) + "");
+});
+
 // Common "switch to this ICAO locally" reset, shared by a user click
 // (selectIcao) and by silently following the server's own active airport
 // (pollAirports below) - see localSelectionPendingSince's comment for why

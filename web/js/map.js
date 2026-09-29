@@ -39,6 +39,25 @@ const wrap = document.getElementById("map-canvas-wrap");
 const ctx = canvas.getContext("2d");
 const placeholder = document.getElementById("map-placeholder");
 
+// Breathing glow under the own aircraft (mirrors PanelMap.cpp's pulse) as a
+// CSS-animated element over the canvas, NOT drawn into the canvas: the map
+// only redraws when something changes (see isAnimating), so a canvas pulse
+// could only step on the 500ms heartbeat. render() just moves this element
+// to the aircraft's screen position; the breathing itself costs no redraw.
+const aircraftPulseEl = document.createElement("div");
+aircraftPulseEl.className = "aircraft-pulse";
+wrap.appendChild(aircraftPulseEl);
+let aircraftPulseVisible = false;
+function placeAircraftPulse(pos) {
+    if (!pos) {
+        if (aircraftPulseVisible) { aircraftPulseEl.style.display = "none"; aircraftPulseVisible = false; }
+        return;
+    }
+    aircraftPulseEl.style.left = pos.x + "px";
+    aircraftPulseEl.style.top = pos.y + "px";
+    if (!aircraftPulseVisible) { aircraftPulseEl.style.display = "block"; aircraftPulseVisible = true; }
+}
+
 // Cached once instead of re-queried by getElementById every render() call -
 // real-usage report ("la version web n'est pas très fluide"): updateHeader()
 // runs inside the 60fps requestAnimationFrame loop, and unlike canvas draws,
@@ -95,14 +114,20 @@ let lastIcaoForView = "";
 // right-drag (see the pointer handlers below) so a user interaction isn't
 // immediately fought by the next frame's auto-recenter.
 let trackMode = "off";
+const trackNoneBtn = document.getElementById("track-none-btn");
 const trackNorthBtn = document.getElementById("track-north-btn");
 const trackHeadingBtn = document.getElementById("track-heading-btn");
+// Three-way segmented control (#SG11: None/Track/Track+Hdg, all three always
+// visible) - replaces the old two-button toggle where clicking the already-
+// active one turned tracking back off; "None" is now its own explicit
+// button instead. Mirrors PanelMap.cpp's drawTrackButton lambda exactly.
 function updateTrackButtons() {
+    trackNoneBtn.classList.toggle("track-active", trackMode === "off");
     trackNorthBtn.classList.toggle("track-active", trackMode === "north");
     trackHeadingBtn.classList.toggle("track-active", trackMode === "heading");
 }
 function setTrackMode(mode) {
-    trackMode = trackMode === mode ? "off" : mode;
+    trackMode = mode;
     updateTrackButtons();
     requestRender();
 }
@@ -241,6 +266,51 @@ function computeStaticBounds(map) {
     return staticBoundsCache;
 }
 
+// Parking-cluster grouping (which stand indices fall in which fixed
+// screen-space grid cell) - see the render()-time block that consumes this
+// for why it's split out from the screen-space average. Only depends on
+// zoom (via clusterProject, which is deliberately pan/rotation-invariant -
+// see its own comment) and the airport's own parking list, neither of
+// which change during a plain pan/rotate drag - so this used to rebuild a
+// fresh Map with string-concatenated keys for every parking stand on every
+// one of those frames for nothing, on top of an already-forced full redraw
+// while dragging (real-usage report: "le dragndrop de la carte ... n'est
+// pas fluide"). Cached on (mapData identity, a coarse zoom bucket) the same
+// way computeStaticBounds is cached above.
+let parkingClusterGroupsCache = null;
+let parkingClusterGroupsForMapData = null;
+let parkingClusterGroupsZoomBucket = null;
+function getParkingClusterGroups() {
+    // One decimal of zoom is finer than the clustering actually needs to
+    // react to.
+    const zoomBucket = Math.round(zoom * 10);
+    if (parkingClusterGroupsCache && parkingClusterGroupsForMapData === mapData &&
+        parkingClusterGroupsZoomBucket === zoomBucket) {
+        return parkingClusterGroupsCache;
+    }
+    const clusters = new Map();
+    for (let i = 0; i < mapData.parking.length; ++i) {
+        // lastClusterProject: this function is called from inside render(),
+        // after that frame's own local `clusterProject` closure has already
+        // been published there (see render()'s own `lastClusterProject =
+        // clusterProject` line) - reused here rather than passed as a
+        // parameter since findSoloParkingHit (outside render(), in the
+        // click-handling code) already relies on the same published
+        // reference for exactly the same reason.
+        const clusterPos = lastClusterProject(mapData.parking[i].x, mapData.parking[i].y);
+        const cellX = Math.floor(clusterPos.x / PARKING_CLUSTER_GRID_PX);
+        const cellY = Math.floor(clusterPos.y / PARKING_CLUSTER_GRID_PX);
+        const key = cellX + "," + cellY;
+        let cl = clusters.get(key);
+        if (!cl) { cl = { indices: [], firstIndex: i }; clusters.set(key, cl); }
+        cl.indices.push(i);
+    }
+    parkingClusterGroupsCache = [...clusters.values()];
+    parkingClusterGroupsForMapData = mapData;
+    parkingClusterGroupsZoomBucket = zoomBucket;
+    return parkingClusterGroupsCache;
+}
+
 function computeBounds(map, includeAircraft) {
     const s = computeStaticBounds(map);
     let minX = s.minX, minY = s.minY, maxX = s.maxX, maxY = s.maxY;
@@ -283,15 +353,26 @@ function projectLatLon(lat, lon) {
     return { x: (lon - originLon) * metersPerDegLon, y: (lat - originLat) * metersPerDegLat };
 }
 
-function drawRotatedText(text, x, y, angleRad, color, font) {
+// Runway-end number: bold on a dark rounded plate, rotated along the runway -
+// mirrors PanelMap.cpp's DrawRunwayLabel (real-usage request: more visible).
+function drawRunwayLabel(text, x, y, angleRad) {
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(angleRad);
-    ctx.fillStyle = color;
-    ctx.font = font;
+    ctx.font = "600 15px Inter, sans-serif";
+    const tw = ctx.measureText(text).width;
+    const PAD_X = 5, H = 15 + 4;
+    ctx.beginPath();
+    ctx.roundRect(-tw / 2 - PAD_X, -H / 2, tw + PAD_X * 2, H, 4);
+    ctx.fillStyle = "rgba(5,7,10,0.88)"; // --bg-deep
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(255,255,255,0.27)";
+    ctx.stroke();
+    ctx.fillStyle = "#ffffff";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(text, 0, 0);
+    ctx.fillText(text, 0, 1);
     ctx.restore();
 }
 
@@ -317,25 +398,29 @@ function findRunwayUsage(usage, label) {
 // read as "closed."
 function drawRunwayUsageIndicator(centerX, centerY, outUx, outUy, usage, label) {
     if (!usage) return;
-    const OUTSET = 15, DOT_R = 4, SPACING = 6.5;
+    // Bigger dots with a dark ring, further out to clear drawRunwayLabel's
+    // plate - mirrors PanelMap.cpp's DrawRunwayUsageIndicator.
+    const OUTSET = 21, DOT_R = 5, SPACING = 8;
     const perpX = -outUy, perpY = outUx;
     const baseX = centerX + outUx * OUTSET, baseY = centerY + outUy * OUTSET;
+    const dot = (x, y, color) => {
+        ctx.fillStyle = "rgba(5,7,10,0.9)";
+        ctx.beginPath(); ctx.arc(x, y, DOT_R + 1.5, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = color;
+        ctx.beginPath(); ctx.arc(x, y, DOT_R, 0, Math.PI * 2); ctx.fill();
+    };
 
     const u = findRunwayUsage(usage, label);
     if (!u) {
-        ctx.fillStyle = "#ff4757";
-        ctx.beginPath(); ctx.arc(baseX, baseY, DOT_R, 0, Math.PI * 2); ctx.fill();
+        dot(baseX, baseY, "#ff4757");
         return;
     }
     if (u.dep) {
-        const x = u.arr ? baseX - perpX * SPACING : baseX, y = u.arr ? baseY - perpY * SPACING : baseY;
-        ctx.fillStyle = "#00e676";
-        ctx.beginPath(); ctx.arc(x, y, DOT_R, 0, Math.PI * 2); ctx.fill();
+        // --semantic-dep: fixed, never the accent (theme::kSemanticDep)
+        dot(u.arr ? baseX - perpX * SPACING : baseX, u.arr ? baseY - perpY * SPACING : baseY, "#22d3ee");
     }
     if (u.arr) {
-        const x = u.dep ? baseX + perpX * SPACING : baseX, y = u.dep ? baseY + perpY * SPACING : baseY;
-        ctx.fillStyle = "#ffb300";
-        ctx.beginPath(); ctx.arc(x, y, DOT_R, 0, Math.PI * 2); ctx.fill();
+        dot(u.dep ? baseX + perpX * SPACING : baseX, u.dep ? baseY + perpY * SPACING : baseY, "#f0a93b"); // --semantic-amber
     }
 }
 
@@ -372,18 +457,15 @@ function distancePointToSegment(p, a, b) {
 // DrawAircraftIcon's own halo technique in PanelMap.cpp exactly.
 const aircraftIconImg = new Image();
 let aircraftIconBlack = null;
-// Baked orange copy for the ground-traffic layer (see drawTrafficIcon
+// Baked gray-blue copy for the ground-traffic layer (see drawTrafficIcon
 // below) - same source-in composite technique as the black halo copy, just
-// a different fillStyle. Matches PanelMap.cpp's theme::kOrange tint on the
-// native side (DrawAircraftIcon's tint param), which needs no separate
-// baked asset since ImDrawList::AddImageQuad tints at draw time - Canvas 2D
-// has no equivalent, hence baking this copy once on load instead of a new
-// PNG asset. Orange (not amber) deliberately - see DrawAircraftIcon's own
-// comment on why: amber already means several other things on this map
-// (ARR dots/tags, OFF AIRPORT/NO ROUTE badges) and reads close to the
-// taxiway-sign yellow, both of which made traffic markers hard to pick out
-// at a glance in real usage.
-let aircraftIconOrange = null;
+// a different fillStyle. Matches PanelMap.cpp's theme::kSemanticTraffic
+// tint (#SG11's fixed gray-blue, independent of accent) on the native side
+// (DrawAircraftIcon's tint param), which needs no separate baked asset
+// since ImDrawList::AddImageQuad tints at draw time - Canvas 2D has no
+// equivalent, hence baking this copy once on load instead of a new PNG
+// asset.
+let aircraftIconTraffic = null;
 aircraftIconImg.onload = () => {
     const c = document.createElement("canvas");
     c.width = aircraftIconImg.naturalWidth;
@@ -401,9 +483,9 @@ aircraftIconImg.onload = () => {
     const cctx2 = c2.getContext("2d");
     cctx2.drawImage(aircraftIconImg, 0, 0);
     cctx2.globalCompositeOperation = "source-in";
-    cctx2.fillStyle = "#FF6D00"; // theme::kOrange's hex - keep native/web in sync
+    cctx2.fillStyle = "#6b7684"; // theme::kSemanticTraffic's hex - keep native/web in sync
     cctx2.fillRect(0, 0, c2.width, c2.height);
-    aircraftIconOrange = c2;
+    aircraftIconTraffic = c2;
 };
 aircraftIconImg.src = "assets/aircraft-icon.png";
 
@@ -414,35 +496,60 @@ const AIRCRAFT_ICON_HALO_OFFSETS = [
 
 // User-provided arrow (assets/wind-arrow-icon.png) for the compass rose's
 // wind indicator - the exact same source PanelMap.cpp's WindArrowIconTexture.h
-// embeds, already baked cyan (the wind arrow's fixed color, not the user's
-// accent - see drawCompassRose's own comment) with alpha, so unlike the
-// aircraft icon above this one needs no separate tint/halo step, just drawn
-// as-is.
+// embeds. #SG11: now tinted to the user's accent color (a single solid
+// arrow, not a fixed cyan one) via the same source-in composite + per-color
+// cache technique as tintedGuidanceIcon below - the alpha channel is all
+// that matters for source-in, so the PNG's own baked-in RGB is irrelevant
+// once retinted.
 const windArrowIconImg = new Image();
 let windArrowIconLoaded = false;
 windArrowIconImg.onload = () => { windArrowIconLoaded = true; };
 windArrowIconImg.src = "assets/wind-arrow-icon.png";
+const windArrowTintCache = new Map();
+function tintedWindArrowIcon(color) {
+    if (!windArrowIconLoaded) return null;
+    let cv = windArrowTintCache.get(color);
+    if (!cv) {
+        cv = document.createElement("canvas");
+        cv.width = windArrowIconImg.naturalWidth;
+        cv.height = windArrowIconImg.naturalHeight;
+        const c2 = cv.getContext("2d");
+        c2.drawImage(windArrowIconImg, 0, 0);
+        c2.globalCompositeOperation = "source-in";
+        c2.fillStyle = color;
+        c2.fillRect(0, 0, cv.width, cv.height);
+        windArrowTintCache.set(color, cv);
+    }
+    return cv;
+}
 
-// Shared silhouette/halo draw, parameterized by fill image and alpha -
-// mirrors PanelMap.cpp's DrawAircraftIcon's own tint+alpha parameterization
-// (Canvas 2D has no per-draw tint like ImDrawList::AddImageQuad, hence a
-// separate pre-baked fill image per color instead of one texture + a tint
+// Shared silhouette/halo draw, parameterized by halo+fill image and alpha -
+// mirrors PanelMap.cpp's DrawAircraftIcon's own texture+tint+alpha
+// parameterization (Canvas 2D has no per-draw tint, hence a separate
+// pre-baked fill/halo image pair per icon instead of one texture + a tint
 // argument, but the "one shared drawing routine, parameterized" shape is
 // otherwise identical, so the two can't silently drift apart).
-function drawAircraftSilhouette(x, y, headingDeg, fillImage, alpha, sizeScale) {
+// Own-ship icon half-extent in screen px (26x26 footprint) - matches
+// PanelMap.cpp's kAircraftIconHalfExtentPx (trimmed from 16 on real-usage
+// request). Also drives the nose-tip connector and the breathing glow.
+const AIRCRAFT_ICON_HALF_EXTENT_PX = 13;
+
+function drawAircraftSilhouette(x, y, headingDeg, fillImage, alpha, sizeScale, halo = true) {
     if (!aircraftIconBlack || !fillImage) {
         return; // image(s) still loading (first frame or two) - skip rather than draw a placeholder shape
     }
     const rad = (headingDeg * Math.PI) / 180;
-    const size = 32 * sizeScale; // 32 matches PanelMap.cpp's DrawAircraftIcon fixed 32x32 screen footprint
+    const size = 2 * AIRCRAFT_ICON_HALF_EXTENT_PX * sizeScale; // matches PanelMap.cpp's DrawAircraftIcon footprint
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(rad);
     if (alpha < 1) {
         ctx.globalAlpha = alpha;
     }
-    for (const [ox, oy] of AIRCRAFT_ICON_HALO_OFFSETS) {
-        ctx.drawImage(aircraftIconBlack, -size / 2 + ox * sizeScale, -size / 2 + oy * sizeScale, size, size);
+    if (halo) {
+        for (const [ox, oy] of AIRCRAFT_ICON_HALO_OFFSETS) {
+            ctx.drawImage(aircraftIconBlack, -size / 2 + ox * sizeScale, -size / 2 + oy * sizeScale, size, size);
+        }
     }
     ctx.drawImage(fillImage, -size / 2, -size / 2, size, size);
     ctx.restore();
@@ -453,18 +560,19 @@ function drawAircraftIcon(x, y, headingDeg) {
 }
 
 // Other aircraft (X-Plane AI traffic, or online-network aircraft) - the
-// pre-baked orange copy for the fill instead of the plain white original,
-// slightly transparent and slightly smaller (matches PanelMap.cpp's
-// kTrafficIconAlpha/kTrafficIconSizeScale), so it stays visually distinct
-// from the user's own solid-white, full-size aircraft. No per-marker
-// smoothing (mirrors PanelMap.cpp's DrawMapPanel traffic loop) - this data
-// only refreshes at ~1Hz server-side and is a secondary situational-
-// awareness layer, not the safety-critical own-ship position.
+// pre-baked gray-blue copy for the fill instead of the plain white
+// original, slightly transparent, slightly smaller and with no halo
+// (matches PanelMap.cpp's kTrafficIconAlpha/kTrafficIconSizeScale and
+// #SG11's "no halo" for third-party traffic), so it stays visually distinct
+// from the user's own solid-white, full-size, halo'd aircraft. No per-
+// marker smoothing (mirrors PanelMap.cpp's DrawMapPanel traffic loop) -
+// this data only refreshes at ~1Hz server-side and is a secondary
+// situational-awareness layer, not the safety-critical own-ship position.
 const TRAFFIC_ICON_ALPHA = 0.78; // ~200/255, matches native's kTrafficIconAlpha
 const TRAFFIC_ICON_SIZE_SCALE = 0.8; // matches native's kTrafficIconSizeScale
 
 function drawTrafficIcon(x, y, headingDeg) {
-    drawAircraftSilhouette(x, y, headingDeg, aircraftIconOrange, TRAFFIC_ICON_ALPHA, TRAFFIC_ICON_SIZE_SCALE);
+    drawAircraftSilhouette(x, y, headingDeg, aircraftIconTraffic, TRAFFIC_ICON_ALPHA, TRAFFIC_ICON_SIZE_SCALE, false);
 }
 
 function pulseAlpha() {
@@ -485,11 +593,39 @@ function pulseAlpha() {
 let renderRequested = true;
 const IDLE_HEARTBEAT_MS = 500;
 function requestRender() { renderRequested = true; }
+// Below this gap between the eased icon position/heading and the latest raw
+// sample, the aircraft counts as "caught up" - not a real ongoing animation,
+// just GPS/SSE noise (a stationary aircraft's reported lat/lon still jitters
+// by a few centimeters tick to tick). Loose enough that a genuinely taxiing
+// aircraft (which keeps moving every tick) never drops out of "animating"
+// mid-motion.
+const ANIM_POS_EPSILON_M = 0.5;
+const ANIM_HEADING_EPSILON_DEG = 0.3;
+
+// Ported from the 3.0 branch (eb047a4, real-usage report "l'app est
+// globalement lente"): this used to return true for the *entire* ground
+// phase just because the aircraft was on the airport, forcing a full
+// 60fps redraw even with a static camera and a parked aircraft. Now only
+// true while something is actually still easing/interactive: the aircraft
+// icon hasn't caught up to its latest raw position/heading, the camera is
+// mid-track-transition, a gesture is live, or the assigned-gate ring is
+// breathing. Everything else relies on requestRender() + the heartbeat.
 function isAnimating() {
     if (!mapData) return false;
     const onAirport = !!(liveAircraft ? liveAircraft.onAirport : mapData.aircraftOnAirport);
-    return onAirport                          // GPS-LIVE badge pulse + aircraft position/heading easing
-        || trackMode !== "off"                // camera tracking ease
+    if (onAirport) {
+        if (!aircraftSmoothingValid) return true; // needs to snap in on the next render
+        const pos = projectedAircraft || (mapData.aircraft ? { x: mapData.aircraft.x, y: mapData.aircraft.y } : null);
+        if (pos) {
+            const dx = pos.x - smoothedAircraftPos.x, dy = pos.y - smoothedAircraftPos.y;
+            if (dx * dx + dy * dy > ANIM_POS_EPSILON_M * ANIM_POS_EPSILON_M) return true;
+        }
+        const headingDegForRotation = liveAircraft ? liveAircraft.headingDeg : (mapData.aircraft ? mapData.aircraft.headingDeg : 0);
+        let headingDelta = headingDegForRotation - smoothedAircraftHeadingDeg;
+        headingDelta -= 360 * Math.floor((headingDelta + 180) / 360);
+        if (Math.abs(headingDelta) > ANIM_HEADING_EPSILON_DEG) return true;
+    }
+    return trackMode !== "off"                // camera tracking ease
         || pointers.size > 0 || !!dragStart   // active pan / zoom / rotate gesture
         || !!(mapData.assignedGate && mapData.assignedGate.valid); // breathing / spinning gate ring
 }
@@ -511,6 +647,7 @@ function render() {
 
     if (!mapData) {
         if (placeholder.style.display !== "flex") placeholder.style.display = "flex";
+        placeAircraftPulse(null);
         return;
     }
     if (placeholder.style.display !== "none") placeholder.style.display = "none";
@@ -639,17 +776,20 @@ function render() {
         }
     }
 
-    // Taxiway lines
+    // Taxiway lines - every segment in one path and a single stroke() call
+    // instead of a beginPath()/stroke() per segment (ported from 3.0's
+    // eb047a4: a big hub has 1000+ segments and the per-call overhead
+    // measurably slowed panning - "la carte est très lente à se déplacer").
     ctx.strokeStyle = "rgb(120,130,150)";
     ctx.lineWidth = Math.max(1.5, 4 * effectiveScale);
+    ctx.beginPath();
     for (const t of mapData.taxiways) {
         const a = toScreen(t.x1, t.y1);
         const b = toScreen(t.x2, t.y2);
-        ctx.beginPath();
         ctx.moveTo(a.x, a.y);
         ctx.lineTo(b.x, b.y);
-        ctx.stroke();
     }
+    ctx.stroke();
 
     // SayIntentions taxi route overlay (flight.json taxi_path, projected by
     // the plugin) - a reference layer, NOT the planner. Mirrors PanelMap.cpp:
@@ -802,7 +942,7 @@ function render() {
     // TAXIWAY_SEGMENT_LABEL_ZOOM_THRESHOLD switches to one label per real
     // junction-to-junction chain instead, matching how much detail is
     // actually visible at that scale.
-    ctx.font = "12px 'Cousine', monospace";
+    ctx.font = "12px 'JetBrains Mono', monospace";
     const drawTaxiwaySign = (wx, wy, label) => {
         const p = toScreen(wx, wy);
         let textW = signWidthCache.get(label);
@@ -831,24 +971,20 @@ function render() {
     // own comment above. Deferred until after every taxiway line/sign so
     // the numbers always stay on top.
     for (const rl of runwayLabels) {
-        drawRotatedText(rl.label, rl.x, rl.y, rl.angle, "#ffffff", "13px 'Cousine', monospace");
+        drawRunwayLabel(rl.label, rl.x, rl.y, rl.angle);
         drawRunwayUsageIndicator(rl.x, rl.y, rl.outUx, rl.outUy, runwayUsage, rl.label);
     }
 
     // Parking - clustered into a fixed screen-space grid, same as
-    // DrawMapPanel's ParkingCluster block.
+    // DrawMapPanel's ParkingCluster block. The GROUPING (which stand falls
+    // in which grid cell) only depends on zoom, not on pan/rotation - see
+    // getParkingClusterGroups's own comment for why that's cached
+    // separately from the screen-space average below, which does need
+    // recomputing every frame (pan/rotation change every frame of an active
+    // drag - real-usage report: "le dragndrop de la carte ... n'est pas
+    // fluide").
     {
-        const clusters = new Map();
-        for (let i = 0; i < mapData.parking.length; ++i) {
-            const clusterPos = clusterProject(mapData.parking[i].x, mapData.parking[i].y);
-            const cellX = Math.floor(clusterPos.x / PARKING_CLUSTER_GRID_PX);
-            const cellY = Math.floor(clusterPos.y / PARKING_CLUSTER_GRID_PX);
-            const key = cellX + "," + cellY;
-            const c = toScreen(mapData.parking[i].x, mapData.parking[i].y);
-            let cl = clusters.get(key);
-            if (!cl) { cl = { sumX: 0, sumY: 0, count: 0, firstIndex: i }; clusters.set(key, cl); }
-            cl.sumX += c.x; cl.sumY += c.y; cl.count += 1;
-        }
+        const groups = getParkingClusterGroups();
         // While a SayIntentions gate is highlighted, fade EVERYTHING else
         // parking-related - dots + labels AND the zoomed-out cluster markers
         // (mirrors PanelMap.cpp).
@@ -857,9 +993,15 @@ function render() {
         const dotAlpha = fade ? 0.34 : 1;
         const labelAlpha = fade ? 0.28 : 1;
 
-        for (const cl of clusters.values()) {
-            const cx = cl.sumX / cl.count, cy = cl.sumY / cl.count;
-            if (cl.count === 1) {
+        for (const cl of groups) {
+            let sumX = 0, sumY = 0;
+            for (const i of cl.indices) {
+                const c = toScreen(mapData.parking[i].x, mapData.parking[i].y);
+                sumX += c.x; sumY += c.y;
+            }
+            const count = cl.indices.length;
+            const cx = sumX / count, cy = sumY / count;
+            if (count === 1) {
                 if (fade && cl.firstIndex === agData.matchedParkingIndex) {
                     continue; // the assigned stand - drawn in the highlight block
                 }
@@ -868,26 +1010,27 @@ function render() {
                 ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2);
                 ctx.fillStyle = cssCache.border2;
                 ctx.fill();
-                ctx.lineWidth = 1.5; ctx.strokeStyle = "#d500f9"; ctx.stroke();
+                ctx.lineWidth = 1.5; ctx.strokeStyle = "#a78bfa"; ctx.stroke();
                 // --text (not --text-dim) - real-usage report: the dim tone
                 // read as too dark/hard to make out against the busy map.
                 ctx.fillStyle = cssCache.text;
-                ctx.font = "11px 'Roboto Medium', sans-serif";
+                ctx.font = "11px Inter, sans-serif";
                 ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
                 ctx.globalAlpha = labelAlpha;
                 ctx.fillText(p.label, cx + 7, cy - 7);
                 ctx.globalAlpha = 1;
             } else {
-                const r = 10;
+                // Cluster marker: ring + solid center dot, no count - mirrors
+                // PanelMap.cpp (count dropped on real-usage request).
+                const r = 7;
                 ctx.globalAlpha = dotAlpha;
                 ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
                 ctx.fillStyle = cssCache.border2;
                 ctx.fill();
-                ctx.lineWidth = 2; ctx.strokeStyle = "#d500f9"; ctx.stroke();
-                ctx.fillStyle = "#eef2ff";
-                ctx.font = "bold 12px 'Roboto Medium', sans-serif";
-                ctx.textAlign = "center"; ctx.textBaseline = "middle";
-                ctx.fillText(String(cl.count), cx, cy);
+                ctx.lineWidth = 2; ctx.strokeStyle = "#a78bfa"; ctx.stroke();
+                ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
+                ctx.fillStyle = "#a78bfa";
+                ctx.fill();
                 ctx.globalAlpha = 1;
             }
         }
@@ -929,7 +1072,7 @@ function render() {
         // Compact pill - just the gate id (the pulsing ring says what it is).
         let tag = ag.displayLabel || ag.label || "?";
         if (!matched) tag += " ?";
-        ctx.font = "11px 'Roboto Medium', sans-serif";
+        ctx.font = "11px Inter, sans-serif";
         ctx.textAlign = "left"; ctx.textBaseline = "middle";
         const tw = ctx.measureText(tag).width;
         const bx = g.x + 12, by = g.y - 9;
@@ -1040,11 +1183,11 @@ function render() {
         if (nearestWorld) {
             // Nose tip: the same rotation drawAircraftSilhouette applies via
             // ctx.rotate(rad) to its own icon draw, applied to the icon's
-            // local nose point (0,-16) - the image points "up" (toward -y)
-            // at heading 0, and 16 is drawAircraftSilhouette's own fixed
-            // screen-space half-extent (size 32) for the own-ship icon.
+            // local nose point - the image points "up" (toward -y) at
+            // heading 0, and AIRCRAFT_ICON_HALF_EXTENT_PX is
+            // drawAircraftSilhouette's own fixed screen-space half-extent.
             const rad = (heading * Math.PI) / 180;
-            const nose = { x: screenPos.x + 16 * Math.sin(rad), y: screenPos.y - 16 * Math.cos(rad) };
+            const nose = { x: screenPos.x + AIRCRAFT_ICON_HALF_EXTENT_PX * Math.sin(rad), y: screenPos.y - AIRCRAFT_ICON_HALF_EXTENT_PX * Math.cos(rad) };
             const nearestScreen = toScreen(nearestWorld.x, nearestWorld.y);
             const dx = nearestScreen.x - nose.x, dy = nearestScreen.y - nose.y;
             if (dx * dx + dy * dy > 16) { // skip a redundant near-zero-length stub when already touching
@@ -1058,9 +1201,12 @@ function render() {
             }
         }
 
+        placeAircraftPulse(screenPos); // breathing glow - see aircraftPulseEl
+
         drawAircraftIcon(screenPos.x, screenPos.y, heading);
     } else {
         aircraftSmoothingValid = false; // re-snap next time it comes back into range
+        placeAircraftPulse(null);
     }
 
     // Other aircraft - x/y arrive already projected into the same local
@@ -1081,6 +1227,7 @@ function render() {
     drawScaleBar(w, h, effectiveScale);
     drawPositionOverlay();
     drawCompassRose(w);
+    drawLegend(w, h);
 
     // Turn-by-turn taxi guidance - ribbon (wedged between the position
     // overlay and compass rose, neither moves) or the frameless floating
@@ -1094,7 +1241,7 @@ function render() {
     // the guidance ribbon when that's present.
     const msg = mapData.siGate && mapData.siGate.actionMessage;
     if (msg) {
-        ctx.font = "12px 'Roboto Medium', sans-serif";
+        ctx.font = "12px Inter, sans-serif";
         ctx.textAlign = "center"; ctx.textBaseline = "top";
         const tw = ctx.measureText(msg).width;
         const toastY = ribbonShown ? 50 : 10;
@@ -1141,7 +1288,7 @@ function drawCompassRose(w) {
     const MARGIN = 20;
     const cx = w - MARGIN - RADIUS, cy = MARGIN + RADIUS;
 
-    ctx.fillStyle = "rgba(13,15,20,0.75)";
+    ctx.fillStyle = "rgba(5,7,10,0.75)"; // --bg-deep (#SG11)
     ctx.strokeStyle = accentColor();
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -1158,7 +1305,7 @@ function drawCompassRose(w) {
         return { x: Math.sin(rad), y: -Math.cos(rad) };
     };
 
-    ctx.font = "bold 14px 'Roboto Medium', sans-serif";
+    ctx.font = "600 14px Inter, sans-serif"; // matches native's BoldFont (Inter SemiBold) for compass-rose text
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.lineJoin = "round";
     for (const tick of [{ b: 0, l: "N" }, { b: 90, l: "E" }, { b: 180, l: "S" }, { b: 270, l: "W" }]) {
@@ -1180,7 +1327,7 @@ function drawCompassRose(w) {
         // taxiway/pavement/route color happens to be directly behind it,
         // not just the ring's own background - the labels sit just outside
         // the ring, over the live map.
-        ctx.strokeStyle = "#0d0f14";
+        ctx.strokeStyle = "#0a0d11"; // --bg (#SG11)
         ctx.lineWidth = 3;
         ctx.strokeText(tick.l, lx, ly);
         ctx.fillStyle = color;
@@ -1191,7 +1338,8 @@ function drawCompassRose(w) {
     // natively) - bare ring rather than a misleading calm arrow.
     if (!ac.windDataAvailable) return;
 
-    if (!windArrowIconLoaded) return; // image still loading (first frame or two) - skip rather than draw a placeholder
+    const tinted = tintedWindArrowIcon(accentColor());
+    if (!tinted) return; // image still loading (first frame or two) - skip rather than draw a placeholder
 
     const dir = bearingToScreenDir(ac.windDirDeg);
 
@@ -1209,17 +1357,22 @@ function drawCompassRose(w) {
     ctx.save();
     ctx.translate(iconCx, iconCy);
     ctx.rotate(rad);
-    ctx.drawImage(windArrowIconImg, -ICON_SIZE / 2, -ICON_SIZE / 2, ICON_SIZE, ICON_SIZE);
+    ctx.drawImage(tinted, -ICON_SIZE / 2, -ICON_SIZE / 2, ICON_SIZE, ICON_SIZE);
     ctx.restore();
 
-    // Speed, printed near the arrow's own (wide) back end - not rotated with
-    // it (a number only readable at certain wind headings would defeat the
-    // point of a live readout), dark-on-cyan for strong, stable contrast
-    // regardless of theme (this arrow is always cyan, not the user's chosen
-    // accent).
-    const numR = ICON_CENTER_OFFSET - 6;
-    ctx.fillStyle = "#0d0f14";
-    ctx.fillText(String(Math.round(ac.windSpeedKt)), cx + dir.x * numR, cy + dir.y * numR);
+    // "ddd°/sskt" label below the whole rose - mirrors PanelMap.cpp's
+    // DrawCompassRose (direction/speed, pushed down clear of the N/E/S/W
+    // tick labels, which sit centered at RADIUS + 10).
+    const WIND_LABEL_GAP_PX = 24;
+    const windLabel = String(Math.round(ac.windDirDeg)).padStart(3, "0") + "°/" + Math.round(ac.windSpeedKt || 0) + "kt";
+    const ly2 = cy + RADIUS + WIND_LABEL_GAP_PX;
+    ctx.textBaseline = "top";
+    ctx.strokeStyle = "#0a0d11"; // --bg (#SG11)
+    ctx.lineWidth = 3;
+    ctx.strokeText(windLabel, cx, ly2);
+    ctx.fillStyle = "#eef2ff";
+    ctx.fillText(windLabel, cx, ly2);
+    ctx.textBaseline = "middle";
 }
 
 function drawScaleBar(w, h, scale) {
@@ -1235,9 +1388,137 @@ function drawScaleBar(w, h, scale) {
     ctx.moveTo(x2, y1 - 4); ctx.lineTo(x2, y1 + 4);
     ctx.stroke();
     ctx.fillStyle = "#eef2ff";
-    ctx.font = "12px 'Roboto Medium', sans-serif";
+    ctx.font = "12px Inter, sans-serif";
     ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
     ctx.fillText("500 m", x1, y1 - 8);
+}
+
+// Collapsible legend, bottom-right corner (#SG11) - mirrors PanelMap.cpp's
+// DrawLegend exactly (same rows, same collapse-by-default). `legendChipRect`
+// is recomputed every draw and read by the click handler below - hit-tested
+// independently of the canvas's own route/parking click resolution (see
+// handleMapClick), same accepted rare-double-hit tradeoff as the native
+// version's own comment explains.
+let legendExpanded = false;
+let legendChipRect = null; // {x0,y0,x1,y1} in canvas-relative px, this frame's collapsed-or-expanded header rect
+function drawLegend(w, h) {
+    const MARGIN = 12, ROW_H = 20, PAD = 10, GLYPH_COL_W = 26;
+    const rows = [
+        { color: null, kind: "aircraft", label: t("legend.aircraft") },
+        { color: null, kind: "traffic", label: t("legend.traffic") },
+        { color: "#a78bfa", kind: "stand", label: t("legend.stand") },
+        { color: "#ff4757", kind: "hold", label: t("legend.holdPoint") },
+        { color: null, kind: "threshold", label: t("legend.threshold") },
+    ];
+    const title = t("legend.title");
+    ctx.font = "12px Inter, sans-serif";
+    const titleW = ctx.measureText(title).width;
+    let chipW = titleW + PAD * 2 + 14;
+    const chipH = ROW_H;
+    const chipP1 = { x: w - MARGIN, y: h - MARGIN };
+    let chipP0 = { x: chipP1.x - chipW, y: chipP1.y - chipH };
+
+    if (legendExpanded) {
+        let maxLabelW = titleW;
+        for (const r of rows) maxLabelW = Math.max(maxLabelW, ctx.measureText(r.label).width);
+        const panelW = Math.max(chipW, GLYPH_COL_W + maxLabelW + PAD * 2);
+        const panelH = chipH + rows.length * ROW_H + PAD;
+        const panelP1 = { ...chipP1 };
+        const panelP0 = { x: panelP1.x - panelW, y: panelP1.y - panelH };
+
+        ctx.fillStyle = "rgba(5,7,10,0.85)"; // --bg-deep
+        roundRectPath(panelP0.x, panelP0.y, panelW, panelH, 12);
+        ctx.fill();
+        ctx.strokeStyle = "#232932"; // --border2
+        ctx.lineWidth = 1;
+        roundRectPath(panelP0.x, panelP0.y, panelW, panelH, 12);
+        ctx.stroke();
+
+        chipP0 = { x: panelP0.x, y: panelP0.y };
+        const headerP1 = { x: panelP1.x, y: panelP0.y + chipH };
+        ctx.textAlign = "left"; ctx.textBaseline = "middle";
+        ctx.fillStyle = "#eef2ff";
+        ctx.fillText(title, chipP0.x + PAD, chipP0.y + chipH / 2);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "#5a6478";
+        ctx.fillText("v", headerP1.x - PAD, chipP0.y + chipH / 2);
+
+        let rowY = headerP1.y;
+        const glyphX = panelP0.x + PAD + GLYPH_COL_W / 2;
+        const labelX = panelP0.x + PAD + GLYPH_COL_W;
+        for (const r of rows) {
+            const cy = rowY + ROW_H / 2;
+            if (r.kind === "aircraft") {
+                drawLegendAircraft(glyphX, cy, 8, aircraftIconImg);
+            } else if (r.kind === "traffic") {
+                drawLegendAircraft(glyphX, cy, 7, aircraftIconTraffic);
+            } else if (r.kind === "stand") {
+                ctx.beginPath(); ctx.arc(glyphX, cy, 5, 0, Math.PI * 2);
+                ctx.fillStyle = "#232932"; ctx.fill();
+                ctx.strokeStyle = r.color; ctx.lineWidth = 1.5; ctx.stroke();
+            } else if (r.kind === "hold") {
+                ctx.strokeStyle = r.color; ctx.lineWidth = 2.5;
+                ctx.beginPath(); ctx.moveTo(glyphX - 7, cy); ctx.lineTo(glyphX + 7, cy); ctx.stroke();
+            } else if (r.kind === "threshold") {
+                ctx.beginPath(); ctx.arc(glyphX - 4, cy, 3.5, 0, Math.PI * 2);
+                ctx.fillStyle = "#22d3ee"; ctx.fill(); // --semantic-dep
+                ctx.beginPath(); ctx.arc(glyphX + 4, cy, 3.5, 0, Math.PI * 2);
+                ctx.fillStyle = "#f0a93b"; ctx.fill();
+            }
+            ctx.textAlign = "left"; ctx.textBaseline = "middle";
+            ctx.fillStyle = "#c8d0e0";
+            ctx.fillText(r.label, labelX, cy);
+            rowY += ROW_H;
+        }
+    } else {
+        ctx.fillStyle = "rgba(5,7,10,0.75)";
+        roundRectPath(chipP0.x, chipP0.y, chipW, chipH, 10);
+        ctx.fill();
+        ctx.strokeStyle = "#232932";
+        ctx.lineWidth = 1;
+        roundRectPath(chipP0.x, chipP0.y, chipW, chipH, 10);
+        ctx.stroke();
+        ctx.textAlign = "left"; ctx.textBaseline = "middle";
+        ctx.fillStyle = "#eef2ff";
+        ctx.fillText(title, chipP0.x + PAD, chipP0.y + chipH / 2);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "#5a6478";
+        ctx.fillText(">", chipP1.x - PAD, chipP0.y + chipH / 2);
+    }
+
+    legendChipRect = { x0: chipP0.x, y0: chipP0.y, x1: chipP1.x, y1: chipP0.y + chipH };
+}
+
+function roundRectPath(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+}
+
+// Upright airplane silhouette, the same image the map's own-ship/traffic
+// icons use - mirrors theme::DrawAircraftGlyph (Theme.cpp).
+// `img` is aircraftIconImg (white) or the baked aircraftIconTraffic copy.
+function drawLegendAircraft(cx, cy, halfExtent, img) {
+    if (!img || (img instanceof HTMLImageElement && !img.complete)) return;
+    ctx.drawImage(img, cx - halfExtent, cy - halfExtent, halfExtent * 2, halfExtent * 2);
+}
+
+// Returns true (and toggles legendExpanded) if `pos` (canvas-relative px)
+// landed on the legend's own header chip - called first, before any other
+// click resolution, by handleMapClick.
+function handleLegendClick(pos) {
+    if (!legendChipRect) return false;
+    if (pos.x >= legendChipRect.x0 && pos.x <= legendChipRect.x1 &&
+        pos.y >= legendChipRect.y0 && pos.y <= legendChipRect.y1) {
+        legendExpanded = !legendExpanded;
+        requestRender();
+        return true;
+    }
+    return false;
 }
 
 // ---- Taxi guidance ribbon (the HUD is native-only, over the sim) --------
@@ -1460,8 +1741,8 @@ function drawGuidanceRibbon(w, h, pref) {
     const thenTmpl = showThen ? guidanceTemplate(g.thenVerb) : "";
 
     const pad = 12, gap = 9, glyphBox = 19;
-    const instrFont = "13px 'Roboto Medium', sans-serif";
-    const monoFont = "15px 'Cousine', monospace";
+    const instrFont = "13px Inter, sans-serif";
+    const monoFont = "15px 'JetBrains Mono', monospace";
     ctx.textBaseline = "middle";
     ctx.textAlign = "left";
 
@@ -1573,15 +1854,15 @@ function drawPositionOverlay() {
     // real-usage report: a fixed-width box (ported from the native
     // version's own hardcoded 216px) clipped its own content on the web
     // build, whose font metrics don't exactly match ImGui's baked glyphs.
-    ctx.font = "14px 'Cousine', monospace";
+    ctx.font = "14px 'JetBrains Mono', monospace";
     const textW = Math.max(...lines.map((l) => ctx.measureText(l).width));
     const w = textW + padX * 2;
     const h = padTop + lineH * (lines.length - 1) + padBottom;
 
-    ctx.fillStyle = "rgba(13,15,20,0.75)";
+    ctx.fillStyle = "rgba(5,7,10,0.75)"; // --bg-deep (#SG11)
     ctx.strokeStyle = accentColor();
     ctx.lineWidth = 1;
-    roundRect(x0, y0, w, h, 6);
+    roundRect(x0, y0, w, h, 12);
     ctx.fill();
     ctx.stroke();
 
@@ -1622,12 +1903,14 @@ function updateHeader() {
             if (statusText !== lastHeader.statusText || lastHeader.statusClass !== "live") {
                 headerEls.status.textContent = statusText;
                 headerEls.status.className = "live";
+                // Pulsing accent dot + halo (#SG11, CSS ::before + @keyframes
+                // below) ahead of a steady label - replaces the earlier
+                // design where the whole "GPS LIVE" text itself pulsed via a
+                // JS-driven opacity write every frame.
+                headerEls.status.style.opacity = "1";
                 lastHeader.statusText = statusText;
                 lastHeader.statusClass = "live";
             }
-            // Genuinely needs a per-frame write while pulsing - this is the
-            // one field real-time animation actually requires.
-            headerEls.status.style.opacity = String(pulseAlpha());
         } else {
             const statusText = t("map.offAirport");
             if (statusText !== lastHeader.statusText || lastHeader.statusClass !== "off") {
@@ -1808,7 +2091,7 @@ function findSoloParkingHit(pos, pointerType) {
 
     const hitRadius = pointerType === "touch" ? PARKING_HIT_RADIUS_TOUCH_PX : PARKING_HIT_RADIUS_PX;
     let bestIndex = -1, bestScore = hitRadius;
-    ctx.font = "11px 'Roboto Medium', sans-serif";
+    ctx.font = "11px Inter, sans-serif";
     for (let i = 0; i < mapData.parking.length; ++i) {
         const p = mapData.parking[i];
         if (!p.label || cellCount.get(cellKey(p)) !== 1) continue;
@@ -1827,6 +2110,7 @@ function findSoloParkingHit(pos, pointerType) {
 }
 
 function handleMapClick(pos, pointerType) {
+    if (handleLegendClick(pos)) return;
     if (!mapData || !lastToScreen) return;
 
     // SayIntentions gate assignment: a click on a labelled parking stand
@@ -1880,6 +2164,7 @@ export function initMapPanel({ onEdgeClicked: edgeCb, onClearRoute: clearCb, onG
     document.getElementById("zoom-reset-btn").addEventListener("click", () => { zoom = 1; panOffset = { x: 0, y: 0 }; rotationDeg = 0; requestRender(); });
     document.getElementById("zoom-in-btn").addEventListener("click", () => { zoom *= ZOOM_BUTTON_FACTOR; clampZoom(); requestRender(); });
     document.getElementById("clear-route-btn").addEventListener("click", () => onClearRoute());
+    trackNoneBtn.addEventListener("click", () => setTrackMode("off"));
     trackNorthBtn.addEventListener("click", () => setTrackMode("north"));
     trackHeadingBtn.addEventListener("click", () => setTrackMode("heading"));
 

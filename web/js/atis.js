@@ -53,7 +53,9 @@ export function renderRunwayChips(container, atis) {
     const usage = buildRunwayUsage(atis);
     for (const u of usage) {
         const chip = document.createElement("div");
-        chip.className = "runway-chip";
+        // has-dep/has-arr: the outline only wraps the bands that exist (see
+        // style.css .runway-chip) - mirrors DrawRunwayChipsAt.
+        chip.className = "runway-chip" + (u.dep ? " has-dep" : "") + (u.arr ? " has-arr" : "");
 
         const dep = document.createElement("div");
         dep.className = "tag dep" + (u.dep ? " show" : "");
