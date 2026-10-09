@@ -11,7 +11,7 @@ web/assets/guidance/straight.png|903229483
 web/assets/guidance/turn-left.png|1371995412
 web/assets/guidance/turn-right.png|512845715
 web/assets/wind-arrow-icon.png|2554909209
-web/css/style.css|3375607563
+web/css/style.css|449888829
 web/fonts/Inter-Regular.ttf|46674273
 web/fonts/Inter-SemiBold.ttf|3985564779
 web/fonts/JetBrainsMono-Regular.ttf|2779657749
@@ -22,8 +22,8 @@ web/js/app.js|3491378566
 web/js/atis.js|2207187175
 web/js/gps.js|419261757
 web/js/i18n.js|3194198727
-web/js/map.js|2190285418
+web/js/map.js|2094711248
 web/js/settings.js|3182447046
 web/js/uiscale.js|3045454354
 web/README.md|1432840794
-win.xpl|769421844
+win.xpl|607180221

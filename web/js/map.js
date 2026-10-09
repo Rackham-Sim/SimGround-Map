@@ -39,25 +39,6 @@ const wrap = document.getElementById("map-canvas-wrap");
 const ctx = canvas.getContext("2d");
 const placeholder = document.getElementById("map-placeholder");
 
-// Breathing glow under the own aircraft (mirrors PanelMap.cpp's pulse) as a
-// CSS-animated element over the canvas, NOT drawn into the canvas: the map
-// only redraws when something changes (see isAnimating), so a canvas pulse
-// could only step on the 500ms heartbeat. render() just moves this element
-// to the aircraft's screen position; the breathing itself costs no redraw.
-const aircraftPulseEl = document.createElement("div");
-aircraftPulseEl.className = "aircraft-pulse";
-wrap.appendChild(aircraftPulseEl);
-let aircraftPulseVisible = false;
-function placeAircraftPulse(pos) {
-    if (!pos) {
-        if (aircraftPulseVisible) { aircraftPulseEl.style.display = "none"; aircraftPulseVisible = false; }
-        return;
-    }
-    aircraftPulseEl.style.left = pos.x + "px";
-    aircraftPulseEl.style.top = pos.y + "px";
-    if (!aircraftPulseVisible) { aircraftPulseEl.style.display = "block"; aircraftPulseVisible = true; }
-}
-
 // Cached once instead of re-queried by getElementById every render() call -
 // real-usage report ("la version web n'est pas très fluide"): updateHeader()
 // runs inside the 60fps requestAnimationFrame loop, and unlike canvas draws,
@@ -483,7 +464,7 @@ aircraftIconImg.onload = () => {
     const cctx2 = c2.getContext("2d");
     cctx2.drawImage(aircraftIconImg, 0, 0);
     cctx2.globalCompositeOperation = "source-in";
-    cctx2.fillStyle = "#6b7684"; // theme::kSemanticTraffic's hex - keep native/web in sync
+    cctx2.fillStyle = "#ffb38a"; // theme::kSemanticTraffic's hex - keep native/web in sync
     cctx2.fillRect(0, 0, c2.width, c2.height);
     aircraftIconTraffic = c2;
 };
@@ -530,9 +511,9 @@ function tintedWindArrowIcon(color) {
 // argument, but the "one shared drawing routine, parameterized" shape is
 // otherwise identical, so the two can't silently drift apart).
 // Own-ship icon half-extent in screen px (26x26 footprint) - matches
-// PanelMap.cpp's kAircraftIconHalfExtentPx (trimmed from 16 on real-usage
-// request). Also drives the nose-tip connector and the breathing glow.
-const AIRCRAFT_ICON_HALF_EXTENT_PX = 13;
+// PanelMap.cpp's kAircraftIconHalfExtentPx (16 -> 13 -> 15, see there).
+// Also drives the nose-tip connector and the disc under the icon.
+const AIRCRAFT_ICON_HALF_EXTENT_PX = 15;
 
 function drawAircraftSilhouette(x, y, headingDeg, fillImage, alpha, sizeScale, halo = true) {
     if (!aircraftIconBlack || !fillImage) {
@@ -561,18 +542,18 @@ function drawAircraftIcon(x, y, headingDeg) {
 
 // Other aircraft (X-Plane AI traffic, or online-network aircraft) - the
 // pre-baked gray-blue copy for the fill instead of the plain white
-// original, slightly transparent, slightly smaller and with no halo
-// (matches PanelMap.cpp's kTrafficIconAlpha/kTrafficIconSizeScale and
-// #SG11's "no halo" for third-party traffic), so it stays visually distinct
+// original, slightly smaller, opaque with the black halo (#SG02, was
+// faint/no-halo; matches PanelMap.cpp kTrafficIconAlpha/kTrafficIconSizeScale)
+// and the gray-blue fill keep it visually distinct
 // from the user's own solid-white, full-size, halo'd aircraft. No per-
 // marker smoothing (mirrors PanelMap.cpp's DrawMapPanel traffic loop) -
 // this data only refreshes at ~1Hz server-side and is a secondary
 // situational-awareness layer, not the safety-critical own-ship position.
-const TRAFFIC_ICON_ALPHA = 0.78; // ~200/255, matches native's kTrafficIconAlpha
-const TRAFFIC_ICON_SIZE_SCALE = 0.8; // matches native's kTrafficIconSizeScale
+const TRAFFIC_ICON_ALPHA = 1; // #SG02: opaque, matches native kTrafficIconAlpha
+const TRAFFIC_ICON_SIZE_SCALE = 0.9; // matches native kTrafficIconSizeScale
 
 function drawTrafficIcon(x, y, headingDeg) {
-    drawAircraftSilhouette(x, y, headingDeg, aircraftIconTraffic, TRAFFIC_ICON_ALPHA, TRAFFIC_ICON_SIZE_SCALE, false);
+    drawAircraftSilhouette(x, y, headingDeg, aircraftIconTraffic, TRAFFIC_ICON_ALPHA, TRAFFIC_ICON_SIZE_SCALE, true);
 }
 
 function pulseAlpha() {
@@ -647,7 +628,6 @@ function render() {
 
     if (!mapData) {
         if (placeholder.style.display !== "flex") placeholder.style.display = "flex";
-        placeAircraftPulse(null);
         return;
     }
     if (placeholder.style.display !== "none") placeholder.style.display = "none";
@@ -1201,12 +1181,23 @@ function render() {
             }
         }
 
-        placeAircraftPulse(screenPos); // breathing glow - see aircraftPulseEl
+        // Static accent disc under the icon, slightly larger than the
+        // silhouette (mirrors PanelMap.cpp).
+        const discR = AIRCRAFT_ICON_HALF_EXTENT_PX + 3;
+        ctx.beginPath();
+        ctx.arc(screenPos.x, screenPos.y, discR, 0, 2 * Math.PI);
+        ctx.fillStyle = routeHighlightColor();
+        ctx.globalAlpha = 120 / 255;
+        ctx.fill();
+        ctx.strokeStyle = routeHighlightColor();
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 230 / 255;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
 
         drawAircraftIcon(screenPos.x, screenPos.y, heading);
     } else {
         aircraftSmoothingValid = false; // re-snap next time it comes back into range
-        placeAircraftPulse(null);
     }
 
     // Other aircraft - x/y arrive already projected into the same local
