@@ -1,3 +1,5 @@
+lin.xpl|5250936
+mac.xpl|7145912
 web/assets/aircraft-icon.png|1065
 web/assets/guidance/cross.png|3740
 web/assets/guidance/fork-hs-hs.png|6160
