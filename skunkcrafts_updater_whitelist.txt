@@ -1,5 +1,5 @@
-lin.xpl|2580052671
-mac.xpl|3277659118
+lin.xpl|3057643160
+mac.xpl|3985225939
 web/assets/aircraft-icon.png|43395335
 web/assets/guidance/cross.png|550315862
 web/assets/guidance/fork-hs-hs.png|4145871711
@@ -28,4 +28,4 @@ web/js/map.js|2094711248
 web/js/settings.js|3182447046
 web/js/uiscale.js|3045454354
 web/README.md|1432840794
-win.xpl|2010490385
+win.xpl|1797682860
